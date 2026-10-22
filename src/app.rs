@@ -14,7 +14,7 @@ use crate::audio::clip::{self, Clip, AUDIO_EXTENSIONS};
 use crate::audio::engine::AudioEngine;
 use crate::audio::mixer::Command;
 use crate::audio::shared::Shared;
-use crate::audio::shared::MAX_SLOTS;
+use crate::audio::shared::MAX_PAGES;
 use crate::config::{Config, Slot, TrayMode};
 use crate::devices;
 use crate::stats::Stats;
@@ -193,25 +193,19 @@ impl SoundboardApp {
         }
     }
 
-    /// Escolhe um arquivo para o primeiro pad vazio; se a grade estiver cheia, ganha uma coluna
-    /// (ou linha) nova.
-    pub(crate) fn new_pad(&mut self) {
-        let (mut rows, mut cols) = (self.config.rows, self.config.cols);
-        let free = |rows: usize, cols: usize, slots: &[Option<Slot>]| (0..rows * cols).find(|&i| slots[i].is_none());
-        if free(rows, cols, &self.config.slots).is_none() {
-            if rows * cols >= MAX_SLOTS {
-                return;
-            }
-            if cols <= rows && cols < 8 {
-                cols += 1;
-            } else {
-                rows += 1;
-            }
+    /// Cria uma página vazia depois da última e abre nela.
+    pub(crate) fn new_page(&mut self) {
+        if self.config.pages < MAX_PAGES {
+            self.config.pages += 1;
+            self.config.current_page = self.config.pages - 1;
+            self.dirty = true;
         }
-        let Some(i) = free(rows, cols, &self.config.slots) else { return };
-        if let Some(path) = Self::choose_file() {
-            (self.config.rows, self.config.cols) = (rows, cols);
-            self.assign(i, path);
+    }
+
+    pub(crate) fn go_to_page(&mut self, page: usize) {
+        if page < self.config.pages && page != self.config.current_page {
+            self.config.current_page = page;
+            self.dirty = true;
         }
     }
 
@@ -227,7 +221,9 @@ impl SoundboardApp {
 
     /// Sons do menu da barra de menus: selecionados ou os mais tocados.
     fn tray_entries(&self) -> (&'static str, Vec<(usize, String)>) {
-        let filled: Vec<(usize, &Slot)> = (0..self.config.visible_slots())
+        let filled: Vec<(usize, &Slot)> = self
+            .config
+            .all_visible_slots()
             .filter_map(|i| self.config.slots[i].as_ref().map(|s| (i, s)))
             .collect();
         let name = |(i, s): &(usize, &Slot)| (*i, s.name.clone());
@@ -450,9 +446,8 @@ impl SoundboardApp {
         });
         let Some(first) = paths.next() else { return };
 
-        let visible = self.config.visible_slots();
         let under_pointer = pos.and_then(|p| self.slot_rects.iter().find(|(_, r)| r.contains(p)).map(|(i, _)| *i));
-        let mut free = (0..visible).filter(|&i| self.config.slots[i].is_none()).collect::<Vec<_>>().into_iter();
+        let mut free = self.config.current_slots().filter(|&i| self.config.slots[i].is_none()).collect::<Vec<_>>().into_iter();
         let target = under_pointer.or_else(|| free.next());
         if let Some(t) = target {
             self.assign(t, first);
@@ -485,8 +480,22 @@ impl SoundboardApp {
         if ctx.wants_keyboard_input() || self.wizard.is_some() {
             return;
         }
+        // Setas ← → trocam de página.
+        let (left, right) = ctx.input(|inp| {
+            (
+                inp.modifiers.is_none() && inp.key_pressed(egui::Key::ArrowLeft),
+                inp.modifiers.is_none() && inp.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        if left && self.config.current_page > 0 {
+            self.go_to_page(self.config.current_page - 1);
+        }
+        if right {
+            self.go_to_page(self.config.current_page + 1);
+        }
+
         let mut hits = Vec::new();
-        for i in 0..self.config.visible_slots() {
+        for i in self.config.current_slots() {
             if self.config.slots[i].is_none() {
                 continue;
             }

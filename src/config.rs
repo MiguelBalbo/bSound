@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::shared::MAX_SLOTS;
+use std::ops::Range;
+
+use crate::audio::shared::{MAX_PAGES, MAX_SLOTS, PAGE_SIZE};
 
 const DEFAULT_KEYS: &[&str] = &[
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "A",
@@ -81,6 +83,9 @@ pub struct Config {
     pub mic_muted: bool,
     pub monitor_mic: bool,
     pub hide_wizard: bool,
+    /// Quantidade de páginas de pads e a página aberta.
+    pub pages: usize,
+    pub current_page: usize,
     pub theme: ThemeMode,
     /// Fechar a janela mantém o app rodando na barra de menus.
     pub close_to_tray: bool,
@@ -103,6 +108,8 @@ impl Default for Config {
             mic_muted: false,
             monitor_mic: false,
             hide_wizard: false,
+            pages: 1,
+            current_page: 0,
             theme: ThemeMode::System,
             close_to_tray: true,
             tray_mode: TrayMode::MostPlayed,
@@ -125,6 +132,8 @@ impl Config {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         cfg.slots.resize(MAX_SLOTS, None);
+        cfg.pages = cfg.pages.clamp(1, MAX_PAGES);
+        cfg.current_page = cfg.current_page.min(cfg.pages - 1);
         cfg.rows = cfg.rows.clamp(1, 8);
         cfg.cols = cfg.cols.clamp(1, 8);
         cfg
@@ -145,13 +154,28 @@ impl Config {
     }
 
     pub fn visible_slots(&self) -> usize {
-        (self.rows * self.cols).min(MAX_SLOTS)
+        (self.rows * self.cols).min(PAGE_SIZE)
+    }
+
+    /// Índices globais dos pads visíveis de uma página.
+    pub fn page_slots(&self, page: usize) -> Range<usize> {
+        let start = page * PAGE_SIZE;
+        start..start + self.visible_slots()
+    }
+
+    pub fn current_slots(&self) -> Range<usize> {
+        self.page_slots(self.current_page)
+    }
+
+    /// Pads visíveis de todas as páginas.
+    pub fn all_visible_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.pages).flat_map(move |page| self.page_slots(page))
     }
 
     pub fn key_for(&self, i: usize) -> Option<String> {
         self.slots[i]
             .as_ref()
             .and_then(|s| s.key.clone())
-            .or_else(|| DEFAULT_KEYS.get(i).map(|k| k.to_string()))
+            .or_else(|| DEFAULT_KEYS.get(i % PAGE_SIZE).map(|k| k.to_string()))
     }
 }

@@ -5,11 +5,13 @@ use egui_phosphor::light as ph;
 
 use crate::app::SoundboardApp;
 use crate::audio::mixer::Command;
+use crate::audio::shared::{MAX_PAGES, PAGE_SIZE};
 use crate::ui::theme::{self, *};
 
 enum Action {
     Trigger(usize),
-    NewPad,
+    NewPage,
+    GoToPage(usize),
     Pick(usize),
     Remove(usize),
     CaptureKey(usize),
@@ -19,8 +21,13 @@ const GRID_PRESETS: &[((usize, usize), &str)] = &[((3, 3), "3×3"), ((4, 4), "4�
 
 impl SoundboardApp {
     pub(crate) fn board_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(36.0);
-        let new_pad = self.board_header(ui);
+        let mut actions = Vec::new();
+        ui.add_space(30.0);
+        self.pager(ui, &mut actions);
+        ui.add_space(14.0);
+        if self.board_header(ui) {
+            actions.push(Action::NewPage);
+        }
         ui.add_space(28.0);
 
         let rows = self.config.rows;
@@ -31,11 +38,8 @@ impl SoundboardApp {
         let grid = Vec2::new(cell_w * cols as f32 + (cols + 1) as f32, cell_h * rows as f32 + (rows + 1) as f32);
 
         let hovering_files = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let mut actions = Vec::new();
-        if new_pad {
-            actions.push(Action::NewPad);
-        }
         self.slot_rects.clear();
+        let start = self.config.current_page * PAGE_SIZE;
 
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             let (grid_rect, _) = ui.allocate_exact_size(grid, Sense::hover());
@@ -43,7 +47,7 @@ impl SoundboardApp {
             ui.painter().rect_filled(grid_rect, 0, p().border);
             for r in 0..rows {
                 for c in 0..cols {
-                    let i = r * cols + c;
+                    let i = start + r * cols + c;
                     let min = grid_rect.min + Vec2::new(1.0 + c as f32 * (cell_w + 1.0), 1.0 + r as f32 * (cell_h + 1.0));
                     let rect = Rect::from_min_size(min, Vec2::new(cell_w, cell_h));
                     self.slot_ui(ui, i, rect, hovering_files, &mut actions);
@@ -54,7 +58,8 @@ impl SoundboardApp {
         for a in actions {
             match a {
                 Action::Trigger(i) => self.trigger(i),
-                Action::NewPad => self.new_pad(),
+                Action::NewPage => self.new_page(),
+                Action::GoToPage(page) => self.go_to_page(page),
                 Action::Pick(i) => self.pick_file(i),
                 Action::Remove(i) => self.remove(i),
                 Action::CaptureKey(i) => self.capture_key_for = Some(i),
@@ -62,17 +67,60 @@ impl SoundboardApp {
         }
     }
 
-    /// Retorna true se "Novo pad" foi clicado.
+    /// Faixa no topo: setas, indicador de páginas e "Página N de M".
+    fn pager(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let page = self.config.current_page;
+        let pages = self.config.pages;
+        ui.horizontal(|ui| {
+            ui.label(eyebrow("Soundboard"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(caps(&format!("de {pages:02}"), 9.0, p().text_variant));
+                ui.label(display(&format!("{:02}", page + 1), 15.0, p().text));
+                ui.label(caps("Página", 9.0, p().text_variant));
+                ui.add_space(12.0);
+                if pager_arrow(ui, ph::CARET_RIGHT, page + 1 < pages, "Próxima página (→)") {
+                    actions.push(Action::GoToPage(page + 1));
+                }
+                // Indicador: um segmento por página; violeta se há som tocando nela.
+                ui.add_space(4.0);
+                for k in (0..pages).rev() {
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), Sense::click());
+                    let resp = resp.on_hover_text(format!("Página {}", k + 1)).on_hover_cursor(CursorIcon::PointingHand);
+                    let playing = self.config.page_slots(k).any(|i| self.shared.is_playing(i));
+                    let color = if k == page {
+                        p().text
+                    } else if playing {
+                        VIOLET
+                    } else if resp.hovered() {
+                        p().text_variant
+                    } else {
+                        p().border
+                    };
+                    let h = if k == page { 3.0 } else { 2.0 };
+                    let bar = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), h));
+                    ui.painter().rect_filled(bar, 0, color);
+                    if resp.clicked() {
+                        actions.push(Action::GoToPage(k));
+                    }
+                }
+                ui.add_space(4.0);
+                if pager_arrow(ui, ph::CARET_LEFT, page > 0, "Página anterior (←)") {
+                    actions.push(Action::GoToPage(page.saturating_sub(1)));
+                }
+            });
+        });
+    }
+
+    /// Retorna true se "Nova página" foi clicado.
     fn board_header(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut new_pad = false;
-        let visible = self.config.visible_slots();
-        let filled = (0..visible).filter(|&i| self.config.slots[i].is_some()).count();
-        let playing = (0..visible).filter(|&i| self.shared.is_playing(i)).count();
+        let mut new_page = false;
+        let range = self.config.current_slots();
+        let visible = range.len();
+        let filled = range.clone().filter(|&i| self.config.slots[i].is_some()).count();
+        let playing = self.config.all_visible_slots().filter(|&i| self.shared.is_playing(i)).count();
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(eyebrow("Soundboard"));
-                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(display("Sons", 46.0, p().text));
                     ui.add_space(10.0);
@@ -93,9 +141,9 @@ impl SoundboardApp {
             });
 
             ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                new_pad = button_trailing(ui, Some(ph::PLUS), "Novo pad", Some(ph::ARROW_RIGHT), Kind::Primary)
-                    .on_hover_text("Escolher um som para o próximo pad livre")
-                    .clicked();
+                let full = self.config.pages >= MAX_PAGES;
+                let hint = if full { "Limite de páginas atingido" } else { "Criar uma página de pads vazia" };
+                new_page = button(ui, Some(ph::PLUS), "Nova página", Kind::Primary).on_hover_text(hint).clicked();
                 ui.add_space(8.0);
                 if button(ui, Some(ph::STOP_CIRCLE), "Parar tudo", Kind::Secondary).on_hover_text("Para todos os sons").clicked() {
                     self.engine.send(Command::StopAll);
@@ -108,7 +156,7 @@ impl SoundboardApp {
                 }
             });
         });
-        new_pad
+        new_page
     }
 
     fn slot_ui(&mut self, ui: &mut egui::Ui, i: usize, rect: Rect, hovering_files: bool, actions: &mut Vec<Action>) {
@@ -235,7 +283,7 @@ impl SoundboardApp {
             match self.config.slots[i].as_mut() {
                 Some(slot) => {
                     ui.add_space(4.0);
-                    ui.label(eyebrow(&format!("Pad {:02}", i + 1)));
+                    ui.label(eyebrow(&format!("Pad {:02} · página {}", i % PAGE_SIZE + 1, i / PAGE_SIZE + 1)));
                     ui.add_space(2.0);
                     dirty |= ui
                         .add(egui::TextEdit::singleline(&mut slot.name).desired_width(f32::INFINITY).margin(Vec2::new(10.0, 8.0)))
@@ -279,4 +327,16 @@ impl SoundboardApp {
 fn fmt_time(secs: f32) -> String {
     let s = secs.max(0.0).round() as u32;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Seta do paginador; apagada quando não há para onde ir.
+fn pager_arrow(ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str) -> bool {
+    if enabled {
+        return icon_button(ui, glyph, 28.0, None).on_hover_text(tip).clicked();
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_stroke(rect, 0, Stroke::new(1.0_f32, p().border), egui::StrokeKind::Inside);
+    paint_text(painter, ui, rect.center(), Align2::CENTER_CENTER, icon(glyph, 14.0, p().text_muted));
+    false
 }

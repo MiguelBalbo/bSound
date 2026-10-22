@@ -2,7 +2,10 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
-pub const MAX_SLOTS: usize = 64;
+/// Pads por página (grade máxima 8×8). O índice global de um pad é `página * PAGE_SIZE + posição`.
+pub const PAGE_SIZE: usize = 64;
+pub const MAX_PAGES: usize = 16;
+pub const MAX_SLOTS: usize = PAGE_SIZE * MAX_PAGES;
 
 pub struct AtomicF32(AtomicU32);
 
