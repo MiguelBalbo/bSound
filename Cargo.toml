@@ -1,0 +1,22 @@
+[package]
+name = "bsound"
+version = "0.1.0"
+edition = "2021"
+description = "bSound: mistura o microfone com um soundboard e envia para um microfone virtual (BlackHole)"
+
+[dependencies]
+anyhow = "1"
+cpal = "0.15"
+crossbeam-channel = "0.5"
+directories = "6"
+eframe = "0.31"
+env_logger = "0.11"
+log = "0.4"
+rfd = "0.15"
+ringbuf = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+
+[profile.release]
+lto = "thin"
