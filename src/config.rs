@@ -11,6 +11,22 @@ const DEFAULT_KEYS: &[&str] = &[
     "S", "D", "F", "G", "H", "J", "K", "L", "Z", "X", "C", "V", "B", "N", "M",
 ];
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Quais sons aparecem no menu da barra de menus.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub enum TrayMode {
+    #[default]
+    MostPlayed,
+    Pinned,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Slot {
@@ -21,6 +37,8 @@ pub struct Slot {
     /// Clicar enquanto toca reinicia o som em vez de parar.
     pub restart: bool,
     pub key: Option<String>,
+    /// Aparece no menu da barra de menus (modo "Selecionados").
+    pub pinned: bool,
 }
 
 impl Default for Slot {
@@ -32,6 +50,7 @@ impl Default for Slot {
             looping: false,
             restart: false,
             key: None,
+            pinned: false,
         }
     }
 }
@@ -62,6 +81,10 @@ pub struct Config {
     pub mic_muted: bool,
     pub monitor_mic: bool,
     pub hide_wizard: bool,
+    pub theme: ThemeMode,
+    /// Fechar a janela mantém o app rodando na barra de menus.
+    pub close_to_tray: bool,
+    pub tray_mode: TrayMode,
 }
 
 impl Default for Config {
@@ -80,13 +103,20 @@ impl Default for Config {
             mic_muted: false,
             monitor_mic: false,
             hide_wizard: false,
+            theme: ThemeMode::System,
+            close_to_tray: true,
+            tray_mode: TrayMode::MostPlayed,
         }
     }
 }
 
 impl Config {
+    pub fn dir() -> Option<PathBuf> {
+        directories::BaseDirs::new().map(|d| d.config_dir().join("soundboard"))
+    }
+
     fn path() -> Option<PathBuf> {
-        directories::BaseDirs::new().map(|d| d.config_dir().join("soundboard").join("config.json"))
+        Self::dir().map(|d| d.join("config.json"))
     }
 
     pub fn load() -> Self {

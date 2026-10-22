@@ -43,9 +43,3 @@ pub fn header(ui: &mut egui::Ui, height: f32) {
         );
     });
 }
-
-/// Símbolo sozinho, centralizado, para telas como o wizard.
-pub fn symbol(ui: &mut egui::Ui, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    paint_symbol(ui.painter(), rect);
-}

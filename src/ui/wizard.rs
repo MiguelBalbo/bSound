@@ -3,7 +3,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, Stroke, Vec2};
+use egui_phosphor::light as ph;
+
+use crate::ui::logo;
+use crate::ui::theme::{self, *};
 
 use crate::devices;
 
@@ -44,127 +48,164 @@ impl Wizard {
 pub fn show(ctx: &egui::Context, w: &mut Wizard, found: Option<&str>) -> WizardOutcome {
     let mut outcome = WizardOutcome::None;
     // Se o driver já existe, abre direto no último passo.
-    if found.is_some() && matches!(w.step, Step::Intro) {
+    if found.is_some() && matches!(w.step, Step::Intro | Step::Verify) {
         w.step = Step::Done;
     }
 
-    egui::Window::new("Configurar microfone virtual")
-        .collapsible(false)
-        .resizable(false)
-        .default_width(460.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    let modal = egui::Modal::new(egui::Id::new("wizard"))
+        .backdrop_color(Color32::from_black_alpha(190))
+        .frame(modal_frame())
         .show(ctx, |ui| {
-            let steps = ["Introdução", "Instalar", "Verificar", "Pronto"];
+            ui.set_width(500.0);
             let current = w.step as usize;
+
             ui.horizontal(|ui| {
-                for (n, s) in steps.iter().enumerate() {
-                    let text = RichText::new(format!("{}. {s}", n + 1));
-                    ui.label(if n == current { text.strong() } else { text.weak() });
-                    if n + 1 < steps.len() {
-                        ui.label(RichText::new("›").weak());
-                    }
-                }
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 24.0), egui::Sense::hover());
+                logo::paint_symbol(ui.painter(), rect);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(caps(&format!("Passo {} de 4", current + 1), 9.0, p().text_variant));
+                });
             });
-            ui.separator();
+            ui.add_space(14.0);
+            // Progresso em quatro segmentos de 2 px.
+            let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), egui::Sense::hover());
+            let seg = (bar.width() - 6.0) / 4.0;
+            for k in 0..4 {
+                let r = egui::Rect::from_min_size(bar.min + Vec2::new(k as f32 * (seg + 2.0), 0.0), Vec2::new(seg, 2.0));
+                ui.painter().rect_filled(r, 0, if k <= current { p().text } else { p().border });
+            }
+            ui.add_space(28.0);
 
             match w.step {
                 Step::Intro => {
-                    crate::ui::logo::symbol(ui, 56.0);
-                    ui.vertical_centered(|ui| ui.heading("Bem-vindo ao bSound"));
-                    ui.add_space(6.0);
-                    ui.label(
-                        "Para Discord, Zoom, OBS e outros apps receberem seu microfone junto com o \
-                         soundboard, o macOS precisa de um dispositivo de áudio virtual.",
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        "O BlackHole 2ch é um driver gratuito e de código aberto: este app envia a mistura \
-                         para ele, e nos outros apps você escolhe \"BlackHole 2ch\" como microfone.",
-                    );
+                    ui.label(eyebrow("Microfone virtual"));
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Continuar ›").clicked() {
-                            w.step = Step::Install;
-                        }
-                        if ui.button("Agora não").clicked() {
-                            outcome = WizardOutcome::Close { hide: w.hide };
-                        }
-                        ui.checkbox(&mut w.hide, "Não mostrar ao abrir");
-                    });
+                    ui.label(display("Sua voz e seus sons, juntos em qualquer app.", 30.0, p().text));
+                    ui.add_space(14.0);
+                    body(ui, "Para Discord, Zoom, OBS e outros apps receberem seu microfone junto com o soundboard, o macOS precisa de um dispositivo de áudio virtual.");
+                    ui.add_space(6.0);
+                    body(ui, "O BlackHole 2ch é gratuito e de código aberto. O bSound envia a mistura para ele, e nos outros apps você escolhe \"BlackHole 2ch\" como microfone.");
+                    ui.add_space(18.0);
+                    ui.checkbox(&mut w.hide, "Não mostrar ao abrir o app");
+                    ui.add_space(22.0);
+                    let (back, next) = footer(ui, None, "Agora não", Some(ph::ARROW_RIGHT), "Continuar");
+                    if back {
+                        outcome = WizardOutcome::Close { hide: w.hide };
+                    }
+                    if next {
+                        w.step = Step::Install;
+                    }
                 }
                 Step::Install => {
-                    if let Some(cmd) = w.brew_command() {
-                        ui.label("Opção 1 — Homebrew (recomendado):");
-                        ui.label(RichText::new(&cmd).monospace());
-                        ui.label(
-                            RichText::new("Abre o Terminal com o comando; ele pede sua senha de administrador.")
-                                .small()
-                                .weak(),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Instalar com Homebrew").clicked() {
-                                w.message = Some(match open_terminal(&cmd) {
-                                    Ok(()) => "Terminal aberto. Conclua a instalação lá e depois clique em \"Já instalei\".".into(),
-                                    Err(e) => format!("Não foi possível abrir o Terminal: {e}. Copie o comando e rode manualmente."),
-                                });
-                            }
-                            if ui.button("Copiar comando").clicked() {
-                                ui.ctx().copy_text(cmd.clone());
-                                w.message = Some("Comando copiado.".into());
-                            }
-                        });
-                        ui.add_space(8.0);
-                        ui.label("Opção 2 — instalador oficial:");
-                    } else {
-                        ui.label("Homebrew não encontrado. Baixe o instalador oficial (escolha a versão 2ch):");
-                    }
-                    if ui.button("Baixar instalador (existential.audio)").clicked() {
-                        let _ = Command::new("open").arg(DOWNLOAD_URL).spawn();
-                    }
-                    if let Some(m) = &w.message {
-                        ui.add_space(6.0);
-                        ui.colored_label(Color32::from_rgb(120, 180, 255), m);
-                    }
+                    ui.label(eyebrow("Instalação"));
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("‹ Voltar").clicked() {
-                            w.step = Step::Intro;
-                        }
-                        if ui.button("Já instalei ›").clicked() {
-                            w.step = Step::Verify;
-                            outcome = WizardOutcome::Rescan;
+                    ui.label(display("Instale o BlackHole 2ch", 30.0, p().text));
+                    ui.add_space(18.0);
+                    if let Some(cmd) = w.brew_command() {
+                        card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(display("Homebrew", 18.0, p().text));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let (r, _) = ui.allocate_exact_size(Vec2::new(96.0, 20.0), egui::Sense::hover());
+                                    theme::badge(ui.painter(), ui, r.right_top() - Vec2::new(92.0, 0.0), "Recomendado", p().text, p().bg);
+                                });
+                            });
+                            ui.add_space(6.0);
+                            body(ui, "Abre o Terminal com o comando abaixo. Ele pede sua senha de administrador.");
+                            ui.add_space(10.0);
+                            egui::Frame::default().fill(p().inset).stroke(Stroke::new(1.0_f32, p().border)).inner_margin(10.0).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(egui::RichText::new(&cmd).monospace().size(11.5).color(p().text));
+                            });
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if button(ui, Some(ph::TERMINAL), "Instalar com Homebrew", Kind::Primary).clicked() {
+                                    w.message = Some(match open_terminal(&cmd) {
+                                        Ok(()) => "Terminal aberto. Conclua a instalação lá e depois clique em \"Já instalei\".".into(),
+                                        Err(e) => format!("Não foi possível abrir o Terminal: {e}. Copie o comando e rode manualmente."),
+                                    });
+                                }
+                                if button(ui, Some(ph::COPY), "Copiar", Kind::Secondary).clicked() {
+                                    ui.ctx().copy_text(cmd.clone());
+                                    w.message = Some("Comando copiado.".into());
+                                }
+                            });
+                        });
+                        ui.add_space(10.0);
+                    }
+                    card(ui, |ui| {
+                        ui.label(display("Instalador oficial", 18.0, p().text));
+                        ui.add_space(6.0);
+                        body(ui, if w.brew.is_some() { "Prefere o instalador .pkg? Baixe a versão 2ch no site do projeto." } else { "Homebrew não encontrado. Baixe a versão 2ch no site do projeto." });
+                        ui.add_space(12.0);
+                        if button(ui, Some(ph::ARROW_SQUARE_OUT), "Abrir existential.audio", Kind::Secondary).clicked() {
+                            let _ = Command::new("open").arg(DOWNLOAD_URL).spawn();
                         }
                     });
+                    if let Some(m) = &w.message {
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            status_dot(ui, p().text);
+                            ui.label(egui::RichText::new(m).size(12.5).color(p().text_variant));
+                        });
+                    }
+                    ui.add_space(22.0);
+                    let (back, next) = footer(ui, Some(ph::ARROW_LEFT), "Voltar", Some(ph::ARROW_RIGHT), "Já instalei");
+                    if back {
+                        w.step = Step::Intro;
+                    }
+                    if next {
+                        w.step = Step::Verify;
+                        outcome = WizardOutcome::Rescan;
+                    }
                 }
                 Step::Verify => {
-                    if found.is_some() {
-                        w.step = Step::Done;
-                    } else {
-                        ui.colored_label(Color32::from_rgb(230, 170, 60), "BlackHole ainda não foi detectado.");
-                        ui.label(
-                            "Se a instalação acabou de terminar, aguarde alguns segundos e verifique de novo. \
-                             Se continuar sem aparecer, reinicie o Mac (ou o app).",
-                        );
-                    }
+                    ui.label(eyebrow("Verificação"));
                     ui.add_space(8.0);
+                    ui.label(display("Ainda não encontramos o BlackHole", 30.0, p().text));
+                    ui.add_space(14.0);
                     ui.horizontal(|ui| {
-                        if ui.button("‹ Voltar").clicked() {
-                            w.step = Step::Install;
-                        }
-                        if ui.button("Verificar novamente").clicked() {
-                            outcome = WizardOutcome::Rescan;
-                        }
+                        status_dot(ui, p().warning);
+                        ui.label(caps("Dispositivo não detectado", 9.0, p().warning));
                     });
+                    ui.add_space(10.0);
+                    body(ui, "Se a instalação acabou de terminar, aguarde alguns segundos e verifique de novo. Se continuar sem aparecer, reinicie o Mac.");
+                    ui.add_space(22.0);
+                    let (back, next) = footer(ui, Some(ph::ARROW_LEFT), "Voltar", Some(ph::ARROWS_CLOCKWISE), "Verificar novamente");
+                    if back {
+                        w.step = Step::Install;
+                    }
+                    if next {
+                        outcome = WizardOutcome::Rescan;
+                    }
                 }
                 Step::Done => {
                     let name = found.unwrap_or("BlackHole 2ch");
-                    ui.colored_label(Color32::from_rgb(90, 200, 120), format!("✔ {name} detectado."));
-                    ui.add_space(4.0);
-                    ui.label(format!("• No Discord, Zoom, OBS etc., escolha \"{name}\" como microfone."));
-                    ui.label("• Para ouvir os sons você mesmo, escolha seus fones em \"Monitor\".");
-                    ui.label("• Clique com o botão direito num quadro para volume, loop, tecla e remoção.");
+                    ui.label(icon_fill(ph::CHECK_CIRCLE, 34.0, p().success));
+                    ui.add_space(10.0);
+                    ui.label(eyebrow("Tudo pronto"));
                     ui.add_space(8.0);
-                    if ui.button("Usar e fechar").clicked() {
+                    ui.label(display(&format!("{name} detectado."), 30.0, p().text));
+                    ui.add_space(18.0);
+                    let tips = [
+                        format!("No Discord, Zoom ou OBS, escolha \"{name}\" como microfone."),
+                        "Para ouvir os sons você mesmo, escolha seus fones em Monitor.".to_string(),
+                        "Clique com o botão direito num pad para volume, loop e tecla.".to_string(),
+                    ];
+                    for (k, tip) in tips.iter().enumerate() {
+                        hairline(ui);
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            ui.label(display(&format!("{:02}", k + 1), 18.0, p().text_muted));
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new(tip).size(13.5).color(p().text));
+                        });
+                        ui.add_space(12.0);
+                    }
+                    hairline(ui);
+                    ui.add_space(22.0);
+                    let (_, next) = footer(ui, None, "", Some(ph::ARROW_RIGHT), "Usar e começar");
+                    if next {
                         outcome = match found {
                             Some(n) => WizardOutcome::UseDevice(n.to_string()),
                             None => WizardOutcome::Close { hide: w.hide },
@@ -173,8 +214,35 @@ pub fn show(ctx: &egui::Context, w: &mut Wizard, found: Option<&str>) -> WizardO
                 }
             }
         });
-
+    if modal.should_close() && matches!(outcome, WizardOutcome::None) {
+        outcome = WizardOutcome::Close { hide: w.hide };
+    }
     outcome
+}
+
+fn body(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(13.5).color(p().text_variant).line_height(Some(20.0)));
+}
+
+fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::default().stroke(Stroke::new(1.0_f32, p().border)).inner_margin(20.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui);
+    });
+}
+
+/// Rodapé com ação secundária (texto) à esquerda e primária à direita. Retorna (voltar, avançar).
+fn footer(ui: &mut egui::Ui, back_icon: Option<&str>, back: &str, next_icon: Option<&str>, next: &str) -> (bool, bool) {
+    let mut clicked = (false, false);
+    ui.horizontal(|ui| {
+        if !back.is_empty() {
+            clicked.0 = button(ui, back_icon, back, Kind::Ghost).clicked();
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            clicked.1 = button(ui, next_icon, next, Kind::Primary).clicked();
+        });
+    });
+    clicked
 }
 
 fn open_terminal(cmd: &str) -> std::io::Result<()> {

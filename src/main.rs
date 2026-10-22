@@ -2,31 +2,13 @@ mod app;
 mod audio;
 mod config;
 mod devices;
+mod stats;
+mod tray;
 mod ui;
 
 use std::sync::Arc;
 
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
-
-fn fonts() -> FontDefinitions {
-    let mut fonts = FontDefinitions::default();
-    for (name, bytes) in [
-        ("inter", &include_bytes!("../assets/fonts/Inter-Regular.ttf")[..]),
-        ("inter-semibold", &include_bytes!("../assets/fonts/Inter-SemiBold.ttf")[..]),
-        ("inter-bold", &include_bytes!("../assets/fonts/Inter-Bold.ttf")[..]),
-    ] {
-        fonts.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
-    }
-    // Inter na frente; as fontes padrão continuam como fallback para emoji e símbolos.
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
-    let fallback = fonts.families[&FontFamily::Proportional].clone();
-    for (family, first) in [("bold", "inter-bold"), ("semibold", "inter-semibold")] {
-        let mut list = vec![first.to_string()];
-        list.extend(fallback.iter().cloned());
-        fonts.families.insert(FontFamily::Name(family.into()), list);
-    }
-    fonts
-}
+use eframe::egui;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -36,8 +18,12 @@ fn main() -> eframe::Result<()> {
             .with_title("bSound")
             .with_app_id("bsound")
             .with_icon(Arc::new(icon))
-            .with_inner_size([960.0, 760.0])
-            .with_min_inner_size([560.0, 460.0])
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([920.0, 620.0])
+            // Barra de título transparente: os botões do macOS ficam sobre a barra lateral.
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -45,13 +31,6 @@ fn main() -> eframe::Result<()> {
         "bSound",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_fonts(fonts());
-            for theme in [egui::Theme::Dark, egui::Theme::Light] {
-                cc.egui_ctx.style_mut_of(theme, |style| {
-                    style.visuals.selection.bg_fill = ui::logo::VIOLET;
-                    style.visuals.hyperlink_color = ui::logo::VIOLET;
-                });
-            }
             Ok(Box::new(app::SoundboardApp::new(cc)))
         }),
     )

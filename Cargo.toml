@@ -10,13 +10,18 @@ cpal = "0.15"
 crossbeam-channel = "0.5"
 directories = "6"
 eframe = "0.31"
+egui-phosphor = { version = "0.9", default-features = false, features = ["light", "fill"] }
 env_logger = "0.11"
 log = "0.4"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSUserDefaults", "NSString"] }
 rfd = "0.15"
 ringbuf = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+tray-icon = "0.26"
 
 [profile.release]
 lto = "thin"

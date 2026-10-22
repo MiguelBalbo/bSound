@@ -1,4 +1,4 @@
-//! Estado do app, carregamento de clipes e barra superior.
+//! Estado do app, carregamento de clipes, barra lateral e barra de status.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -7,14 +7,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32};
+use egui_phosphor::light as ph;
 
 use crate::audio::clip::{self, Clip, AUDIO_EXTENSIONS};
 use crate::audio::engine::AudioEngine;
 use crate::audio::mixer::Command;
 use crate::audio::shared::Shared;
-use crate::config::{Config, Slot};
+use crate::audio::shared::MAX_SLOTS;
+use crate::config::{Config, Slot, TrayMode};
 use crate::devices;
+use crate::stats::Stats;
+use crate::tray::{self, Playback, Tray, TrayLink};
+use crate::ui::theme::*;
+use crate::ui::settings;
 use crate::ui::wizard::{self, Wizard, WizardOutcome};
 
 struct LoadResult {
@@ -36,6 +42,11 @@ pub struct SoundboardApp {
     inputs: Vec<String>,
     outputs: Vec<String>,
     wizard: Option<Wizard>,
+    settings_open: bool,
+    last_theme_check: std::time::Instant,
+    pub(crate) stats: Arc<Stats>,
+    tray_link: Arc<TrayLink>,
+    tray: Option<Tray>,
     pub(crate) capture_key_for: Option<usize>,
     pub(crate) slot_rects: Vec<(usize, egui::Rect)>,
     mic_meter: f32,
@@ -67,6 +78,16 @@ impl SoundboardApp {
         );
         let (load_tx, load_rx) = unbounded();
         let wizard = (blackhole.is_none() && !config.hide_wizard).then(Wizard::new);
+        crate::ui::theme::apply(&cc.egui_ctx, config.theme);
+
+        let stats = Arc::new(Stats::load());
+        let tray_link = Arc::new(TrayLink {
+            playback: std::sync::Mutex::new(Playback { tx: engine.sender(), clips: HashMap::new() }),
+            shared: shared.clone(),
+            stats: stats.clone(),
+            ctx: cc.egui_ctx.clone(),
+        });
+        let tray = Tray::new(tray_link.clone());
 
         let mut app = Self {
             config,
@@ -81,6 +102,11 @@ impl SoundboardApp {
             inputs,
             outputs,
             wizard,
+            settings_open: false,
+            last_theme_check: std::time::Instant::now(),
+            stats,
+            tray_link,
+            tray,
             capture_key_for: None,
             slot_rects: Vec::new(),
             mic_meter: 0.0,
@@ -139,6 +165,7 @@ impl SoundboardApp {
         slot.key = key;
         self.config.slots[i] = Some(slot);
         self.clips.remove(&i);
+        self.stats.reset(i);
         self.request_load(i);
         self.dirty = true;
     }
@@ -147,17 +174,43 @@ impl SoundboardApp {
         self.engine.send(Command::Stop(i));
         self.config.slots[i] = None;
         self.clips.remove(&i);
+        self.stats.reset(i);
         self.loading.remove(&i);
         self.load_errors.remove(&i);
         self.dirty = true;
     }
 
-    pub(crate) fn pick_file(&mut self, i: usize) {
-        let file = rfd::FileDialog::new()
+    fn choose_file() -> Option<PathBuf> {
+        rfd::FileDialog::new()
             .set_title("Escolha um som")
             .add_filter("Áudio", AUDIO_EXTENSIONS)
-            .pick_file();
-        if let Some(path) = file {
+            .pick_file()
+    }
+
+    pub(crate) fn pick_file(&mut self, i: usize) {
+        if let Some(path) = Self::choose_file() {
+            self.assign(i, path);
+        }
+    }
+
+    /// Escolhe um arquivo para o primeiro pad vazio; se a grade estiver cheia, ganha uma coluna
+    /// (ou linha) nova.
+    pub(crate) fn new_pad(&mut self) {
+        let (mut rows, mut cols) = (self.config.rows, self.config.cols);
+        let free = |rows: usize, cols: usize, slots: &[Option<Slot>]| (0..rows * cols).find(|&i| slots[i].is_none());
+        if free(rows, cols, &self.config.slots).is_none() {
+            if rows * cols >= MAX_SLOTS {
+                return;
+            }
+            if cols <= rows && cols < 8 {
+                cols += 1;
+            } else {
+                rows += 1;
+            }
+        }
+        let Some(i) = free(rows, cols, &self.config.slots) else { return };
+        if let Some(path) = Self::choose_file() {
+            (self.config.rows, self.config.cols) = (rows, cols);
             self.assign(i, path);
         }
     }
@@ -168,6 +221,39 @@ impl SoundboardApp {
             self.engine.send(Command::Stop(i));
         } else if let Some(clip) = self.clips.get(&i) {
             self.engine.send(Command::Play { slot: i, clip: clip.clone() });
+            self.stats.record(i);
+        }
+    }
+
+    /// Sons do menu da barra de menus: selecionados ou os mais tocados.
+    fn tray_entries(&self) -> (&'static str, Vec<(usize, String)>) {
+        let filled: Vec<(usize, &Slot)> = (0..self.config.visible_slots())
+            .filter_map(|i| self.config.slots[i].as_ref().map(|s| (i, s)))
+            .collect();
+        let name = |(i, s): &(usize, &Slot)| (*i, s.name.clone());
+        match self.config.tray_mode {
+            TrayMode::Pinned => ("Selecionados", filled.iter().filter(|(_, s)| s.pinned).take(12).map(name).collect()),
+            TrayMode::MostPlayed => {
+                let mut played: Vec<_> = filled.iter().filter(|(i, _)| self.stats.get(*i) > 0).collect();
+                played.sort_by_key(|(i, _)| std::cmp::Reverse(self.stats.get(*i)));
+                if played.is_empty() {
+                    ("Sons", filled.iter().take(8).map(name).collect())
+                } else {
+                    ("Mais tocados", played.into_iter().take(8).map(name).collect())
+                }
+            }
+        }
+    }
+
+    fn sync_tray(&mut self) {
+        {
+            let mut pb = self.tray_link.playback.lock().unwrap_or_else(|e| e.into_inner());
+            pb.tx = self.engine.sender();
+            pb.clips.clone_from(&self.clips);
+        }
+        let (title, entries) = self.tray_entries();
+        if let Some(t) = &mut self.tray {
+            t.update(title, entries);
         }
     }
 
@@ -208,95 +294,148 @@ impl SoundboardApp {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut restart = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("🎤 Microfone");
-            let label = self.config.input_device.clone().unwrap_or_else(|| "Padrão do sistema".into());
-            egui::ComboBox::from_id_salt("input").selected_text(label).width(200.0).show_ui(ui, |ui| {
-                restart |= ui.selectable_value(&mut self.config.input_device, None, "Padrão do sistema").changed();
-                for n in &self.inputs {
-                    restart |= ui.selectable_value(&mut self.config.input_device, Some(n.clone()), n).changed();
+        ui.add_space(46.0); // espaço dos botões da janela do macOS
+        ui.horizontal(|ui| {
+            crate::ui::logo::header(ui, 22.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon_button(ui, ph::GEAR, 32.0, None).on_hover_text("Configurações").clicked() {
+                    self.settings_open = true;
                 }
             });
+        });
+        ui.add_space(30.0);
 
-            ui.label("📤 Saída");
-            let label = self.config.output_device.clone().unwrap_or_else(|| "Padrão do sistema".into());
-            egui::ComboBox::from_id_salt("output").selected_text(label).width(200.0).show_ui(ui, |ui| {
-                restart |= ui.selectable_value(&mut self.config.output_device, None, "Padrão do sistema").changed();
-                for n in &self.outputs {
-                    restart |= ui.selectable_value(&mut self.config.output_device, Some(n.clone()), n).changed();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+            // Entrada
+            ui.label(eyebrow("Entrada"));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(display("Microfone", 22.0, p().text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let muted = self.config.mic_muted;
+                    let (glyph, active, tip) = if muted {
+                        (ph::MICROPHONE_SLASH, Some(CORAL), "Ativar microfone")
+                    } else {
+                        (ph::MICROPHONE, None, "Silenciar microfone")
+                    };
+                    if icon_button(ui, glyph, 32.0, active).on_hover_text(tip).clicked() {
+                        self.config.mic_muted = !muted;
+                        self.dirty = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            restart |= device_combo(ui, "input", &mut self.config.input_device, "Padrão do sistema", &self.inputs);
+            ui.add_space(10.0);
+            self.dirty |= gain(ui, "Ganho", &mut self.config.mic_gain, 2.0);
+            ui.add_space(2.0);
+            meter(ui, self.mic_meter, CORAL);
+            if self.config.mic_muted {
+                ui.add_space(4.0);
+                ui.label(caps("Silenciado", 9.0, CORAL));
+            }
+
+            section_gap(ui);
+            ui.label(eyebrow("Saída"));
+            ui.add_space(2.0);
+            ui.label(display("Microfone virtual", 22.0, p().text));
+            ui.add_space(4.0);
+            restart |= device_combo(ui, "output", &mut self.config.output_device, "Padrão do sistema", &self.outputs);
+            ui.add_space(6.0);
+            let out_is_virtual = self.engine.output_name.as_deref().is_some_and(devices::is_virtual);
+            ui.horizontal(|ui| {
+                if out_is_virtual {
+                    status_dot(ui, p().success);
+                    ui.label(caps("Pronto para Discord, Zoom e OBS", 9.0, p().text_variant));
+                } else {
+                    status_dot(ui, p().warning);
+                    ui.label(caps("Não é um microfone virtual", 9.0, p().warning));
                 }
             });
-
-            ui.label("🎧 Monitor");
-            let label = self.config.monitor_device.clone().unwrap_or_else(|| "Nenhum".into());
-            egui::ComboBox::from_id_salt("monitor").selected_text(label).width(180.0).show_ui(ui, |ui| {
-                restart |= ui.selectable_value(&mut self.config.monitor_device, None, "Nenhum").changed();
-                for n in self.outputs.iter().filter(|n| !devices::is_virtual(n)) {
-                    restart |= ui.selectable_value(&mut self.config.monitor_device, Some(n.clone()), n).changed();
+            if !out_is_virtual {
+                ui.add_space(6.0);
+                if button(ui, Some(ph::ARROW_RIGHT), "Configurar BlackHole", Kind::Secondary).clicked() {
+                    self.wizard = Some(Wizard::new());
                 }
-            });
+            }
 
-            if ui.button("↻").on_hover_text("Atualizar lista de dispositivos").clicked() {
+            section_gap(ui);
+            ui.label(eyebrow("Mix"));
+            ui.add_space(8.0);
+            self.dirty |= gain(ui, "Sons", &mut self.config.board_gain, 2.0);
+            ui.add_space(8.0);
+            self.dirty |= gain(ui, "Master", &mut self.config.master_gain, 2.0);
+            ui.add_space(2.0);
+            meter(ui, self.out_meter, p().text);
+
+            section_gap(ui);
+            ui.label(eyebrow("Monitor"));
+            ui.add_space(2.0);
+            ui.label(display("Fones", 22.0, p().text));
+            ui.add_space(4.0);
+            let monitors: Vec<String> = self.outputs.iter().filter(|n| !devices::is_virtual(n)).cloned().collect();
+            restart |= device_combo(ui, "monitor", &mut self.config.monitor_device, "Nenhum", &monitors);
+            if self.config.monitor_device.is_some() {
+                ui.add_space(10.0);
+                self.dirty |= gain(ui, "Volume", &mut self.config.monitor_gain, 2.0);
+                ui.add_space(4.0);
+                self.dirty |= ui.checkbox(&mut self.config.monitor_mic, "Ouvir meu microfone").changed();
+            } else {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Escolha seus fones para ouvir os sons que você toca.").size(12.0).color(p().text_variant));
+            }
+
+            section_gap(ui);
+            if button(ui, Some(ph::ARROWS_CLOCKWISE), "Atualizar dispositivos", Kind::Ghost).clicked() {
                 self.refresh_devices();
                 restart = true;
             }
-            if ui.button("Microfone virtual…").clicked() {
+            if button(ui, Some(ph::BROADCAST), "Microfone virtual", Kind::Ghost).clicked() {
                 self.wizard = Some(Wizard::new());
             }
+            ui.add_space(16.0);
         });
 
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            let mute_label = if self.config.mic_muted { "🔇 Mic mudo" } else { "🎤 Mic ativo" };
-            if ui.toggle_value(&mut self.config.mic_muted, mute_label).changed() {
-                self.dirty = true;
-            }
-            self.dirty |= gain_slider(ui, &mut self.config.mic_gain, "Mic");
-            self.dirty |= gain_slider(ui, &mut self.config.board_gain, "Sons");
-            self.dirty |= gain_slider(ui, &mut self.config.master_gain, "Master");
-            if self.config.monitor_device.is_some() {
-                self.dirty |= gain_slider(ui, &mut self.config.monitor_gain, "Monitor");
-                self.dirty |= ui.checkbox(&mut self.config.monitor_mic, "Ouvir meu mic").changed();
-            }
-        });
-
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            self.mic_meter = self.shared.mic_level.take().max(self.mic_meter * 0.85);
-            self.out_meter = self.shared.out_level.take().max(self.out_meter * 0.85);
-            level_meter(ui, "Mic", self.mic_meter);
-            level_meter(ui, "Saída", self.out_meter);
-            if ui.button("⏹ Parar tudo").clicked() {
-                self.engine.send(Command::StopAll);
-            }
-            ui.separator();
-            ui.label("Grade");
-            self.dirty |= ui.add(egui::DragValue::new(&mut self.config.rows).range(1..=8).suffix(" lin")).changed();
-            ui.label("×");
-            self.dirty |= ui.add(egui::DragValue::new(&mut self.config.cols).range(1..=8).suffix(" col")).changed();
-        });
-
-        let out_is_virtual = self.engine.output_name.as_deref().is_some_and(devices::is_virtual);
-        if !out_is_virtual {
-            ui.colored_label(
-                Color32::from_rgb(230, 170, 60),
-                "⚠ A saída não é o BlackHole: outros apps não vão receber o áudio como microfone.",
-            );
+        if restart {
+            self.restart_engine();
         }
-        for e in &self.engine.errors {
-            ui.colored_label(Color32::from_rgb(230, 90, 90), format!("⚠ {e}"));
-        }
-        if self.shared.stream_error.load(Relaxed) {
-            ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(230, 90, 90), "⚠ Um dispositivo de áudio foi desconectado ou falhou.");
-                if ui.button("Reiniciar áudio").clicked() {
-                    restart = true;
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let mut restart = false;
+        ui.horizontal_centered(|ui| {
+            let out_is_virtual = self.engine.output_name.as_deref().is_some_and(devices::is_virtual);
+            let failed = self.shared.stream_error.load(Relaxed);
+            let color = if failed {
+                p().danger
+            } else if out_is_virtual {
+                p().success
+            } else {
+                p().warning
+            };
+            status_dot(ui, color);
+            let rate = format!("{:.1}", self.engine.sample_rate as f32 / 1000.0);
+            let name = self.engine.output_name.clone().unwrap_or_else(|| "Sem saída".into());
+            ui.label(caps(&format!("{name} · {} kHz", rate.trim_end_matches(".0")), 9.0, p().text_variant));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if failed {
+                    if button(ui, Some(ph::ARROWS_CLOCKWISE), "Reiniciar áudio", Kind::Ghost).clicked() {
+                        restart = true;
+                    }
+                    ui.label(caps("Um dispositivo foi desconectado", 9.0, p().danger));
+                } else if let Some(e) = self.engine.errors.first() {
+                    ui.label(icon_text(ph::WARNING, e, p().danger));
+                } else {
+                    ui.label(caps("Clique direito edita  ·  arraste arquivos para os pads", 9.0, p().text_muted));
                 }
             });
-        }
-
+        });
         if restart {
             self.restart_engine();
         }
@@ -363,54 +502,76 @@ impl SoundboardApp {
     }
 }
 
-/// Medidor de nível simples (o ProgressBar do egui desenha um ponto quando está em 0).
-fn level_meter(ui: &mut egui::Ui, label: &str, level: f32) {
-    ui.label(label);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 10.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-    let level = level.clamp(0.0, 1.0);
-    if level > 0.001 {
-        let fill = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * level, rect.height()));
-        let color = if level > 0.9 { crate::ui::logo::CORAL } else { crate::ui::logo::VIOLET };
-        painter.rect_filled(fill, 3.0, color);
-    }
+fn section_gap(ui: &mut egui::Ui) {
+    ui.add_space(22.0);
+    hairline(ui);
+    ui.add_space(22.0);
 }
 
-fn gain_slider(ui: &mut egui::Ui, value: &mut f32, label: &str) -> bool {
-    ui.add(
-        egui::Slider::new(value, 0.0..=2.0)
-            .text(label)
-            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-    )
-    .changed()
+fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, none_label: &str, options: &[String]) -> bool {
+    let mut changed = false;
+    let selected = value.clone().unwrap_or_else(|| none_label.to_owned());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            changed |= ui.selectable_value(value, None, none_label).changed();
+            for n in options {
+                changed |= ui.selectable_value(value, Some(n.clone()), n).changed();
+            }
+        });
+    changed
 }
 
 impl eframe::App for SoundboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Acompanha o modo claro/escuro do macOS quando a aparência é "Sistema".
+        if self.config.theme == crate::config::ThemeMode::System && self.last_theme_check.elapsed() > Duration::from_secs(1) {
+            self.last_theme_check = std::time::Instant::now();
+            crate::ui::theme::set_mode(ctx, self.config.theme);
+        }
+        crate::ui::theme::sync(ctx);
+        // Fechar a janela esconde o app na barra de menus (se ativado nas configurações).
+        if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray && self.tray.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            tray::hide_app();
+        }
         self.poll_loads();
         self.handle_dropped_files(ctx);
         self.handle_keys(ctx);
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(8.0);
-            crate::ui::logo::header(ui, 26.0);
-            ui.add_space(6.0);
-            self.top_bar(ui);
-            ui.add_space(6.0);
-        });
-        egui::CentralPanel::default().show(ctx, |ui| self.board_ui(ui));
+        self.mic_meter = self.shared.mic_level.take().max(self.mic_meter * 0.85);
+        self.out_meter = self.shared.out_level.take().max(self.out_meter * 0.85);
+
+        egui::SidePanel::left("sidebar")
+            .exact_width(300.0)
+            .resizable(false)
+            .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin::symmetric(24, 0)))
+            .show(ctx, |ui| self.sidebar(ui));
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(36.0)
+            .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin::symmetric(24, 0)))
+            .show(ctx, |ui| self.status_bar(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 24 }))
+            .show(ctx, |ui| self.board_ui(ui));
 
         if let Some(i) = self.capture_key_for {
-            egui::Window::new("Definir tecla")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            let modal = egui::Modal::new(egui::Id::new("key-capture"))
+                .backdrop_color(Color32::from_black_alpha(180))
+                .frame(modal_frame())
                 .show(ctx, |ui| {
+                    ui.set_width(380.0);
                     let name = self.config.slots[i].as_ref().map(|s| s.name.as_str()).unwrap_or("");
-                    ui.label(RichText::new(format!("Pressione uma tecla para \"{name}\"")).size(16.0));
-                    ui.label("Esc cancela.");
+                    ui.label(eyebrow("Tecla de atalho"));
+                    ui.add_space(8.0);
+                    ui.label(display(&format!("Pressione uma tecla para “{name}”"), 24.0, p().text));
+                    ui.add_space(14.0);
+                    ui.label(egui::RichText::new("Esc cancela.").size(12.5).color(p().text_variant));
                 });
+            if modal.should_close() {
+                self.capture_key_for = None;
+            }
         }
 
         if let Some(w) = &mut self.wizard {
@@ -434,7 +595,16 @@ impl eframe::App for SoundboardApp {
             }
         }
 
+        if self.settings_open {
+            match settings::show(ctx, &mut self.config) {
+                settings::Outcome::None => {}
+                settings::Outcome::Changed => self.dirty = true,
+                settings::Outcome::Close => self.settings_open = false,
+            }
+        }
+
         self.sync_shared();
+        self.sync_tray();
         if self.dirty {
             self.config.save();
             self.dirty = false;

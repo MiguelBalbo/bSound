@@ -1,47 +1,60 @@
-//! Grade de quadrados do soundboard.
+//! Área principal: cabeçalho editorial e grade de pads em treliça de linhas finas.
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, text::LayoutJob, Align, Align2, Color32, CursorIcon, Layout, Pos2, Rect, Sense, Stroke, Vec2};
+use egui_phosphor::light as ph;
 
 use crate::app::SoundboardApp;
+use crate::audio::mixer::Command;
+use crate::ui::theme::{self, *};
 
 enum Action {
     Trigger(usize),
+    NewPad,
     Pick(usize),
     Remove(usize),
     CaptureKey(usize),
 }
 
-const GAP: f32 = 10.0;
-const RADIUS: CornerRadius = CornerRadius::same(10);
+const GRID_PRESETS: &[((usize, usize), &str)] = &[((3, 3), "3×3"), ((4, 4), "4×4"), ((5, 5), "5×5"), ((6, 6), "6×6")];
 
 impl SoundboardApp {
     pub(crate) fn board_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(36.0);
+        let new_pad = self.board_header(ui);
+        ui.add_space(28.0);
+
         let rows = self.config.rows;
         let cols = self.config.cols;
         let avail = ui.available_size();
-        let w = ((avail.x - GAP * (cols as f32 - 1.0)) / cols as f32).max(70.0);
-        let h = ((avail.y - GAP * (rows as f32 - 1.0)) / rows as f32).max(60.0);
-        let size = Vec2::new(w, h);
+        let cell_w = ((avail.x - (cols + 1) as f32) / cols as f32).floor().max(120.0);
+        let cell_h = ((avail.y - (rows + 1) as f32) / rows as f32).floor().max(112.0);
+        let grid = Vec2::new(cell_w * cols as f32 + (cols + 1) as f32, cell_h * rows as f32 + (rows + 1) as f32);
 
         let hovering_files = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         let mut actions = Vec::new();
+        if new_pad {
+            actions.push(Action::NewPad);
+        }
         self.slot_rects.clear();
 
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::splat(GAP);
+            let (grid_rect, _) = ui.allocate_exact_size(grid, Sense::hover());
+            // Treliça: fundo na cor da linha, células com 1 px de folga entre si.
+            ui.painter().rect_filled(grid_rect, 0, p().border);
             for r in 0..rows {
-                ui.horizontal(|ui| {
-                    for c in 0..cols {
-                        let i = r * cols + c;
-                        self.slot_ui(ui, i, size, hovering_files, &mut actions);
-                    }
-                });
+                for c in 0..cols {
+                    let i = r * cols + c;
+                    let min = grid_rect.min + Vec2::new(1.0 + c as f32 * (cell_w + 1.0), 1.0 + r as f32 * (cell_h + 1.0));
+                    let rect = Rect::from_min_size(min, Vec2::new(cell_w, cell_h));
+                    self.slot_ui(ui, i, rect, hovering_files, &mut actions);
+                }
             }
         });
 
         for a in actions {
             match a {
                 Action::Trigger(i) => self.trigger(i),
+                Action::NewPad => self.new_pad(),
                 Action::Pick(i) => self.pick_file(i),
                 Action::Remove(i) => self.remove(i),
                 Action::CaptureKey(i) => self.capture_key_for = Some(i),
@@ -49,102 +62,167 @@ impl SoundboardApp {
         }
     }
 
-    fn slot_ui(&mut self, ui: &mut egui::Ui, i: usize, size: Vec2, hovering_files: bool, actions: &mut Vec<Action>) {
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    /// Retorna true se "Novo pad" foi clicado.
+    fn board_header(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut new_pad = false;
+        let visible = self.config.visible_slots();
+        let filled = (0..visible).filter(|&i| self.config.slots[i].is_some()).count();
+        let playing = (0..visible).filter(|&i| self.shared.is_playing(i)).count();
+
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(eyebrow("Soundboard"));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(display("Sons", 46.0, p().text));
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(24.0); // alinha o contador à base do título
+                        ui.horizontal(|ui| {
+                            ui.label(display(&filled.to_string(), 22.0, p().text));
+                            ui.label(caps(&format!("de {visible} pads"), 9.0, p().text_variant));
+                            if playing > 0 {
+                                ui.add_space(6.0);
+                                let (rect, _) = ui.allocate_exact_size(Vec2::new(92.0, 20.0), Sense::hover());
+                                let label = format!("{playing} tocando");
+                                theme::badge(ui.painter(), ui, rect.left_center() - Vec2::new(0.0, 10.0), &label, VIOLET, Color32::WHITE);
+                            }
+                        });
+                    });
+                });
+            });
+
+            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                new_pad = button_trailing(ui, Some(ph::PLUS), "Novo pad", Some(ph::ARROW_RIGHT), Kind::Primary)
+                    .on_hover_text("Escolher um som para o próximo pad livre")
+                    .clicked();
+                ui.add_space(8.0);
+                if button(ui, Some(ph::STOP_CIRCLE), "Parar tudo", Kind::Secondary).on_hover_text("Para todos os sons").clicked() {
+                    self.engine.send(Command::StopAll);
+                }
+                ui.add_space(12.0);
+                let mut grid = (self.config.rows, self.config.cols);
+                if segmented(ui, &mut grid, GRID_PRESETS) {
+                    (self.config.rows, self.config.cols) = grid;
+                    self.dirty = true;
+                }
+            });
+        });
+        new_pad
+    }
+
+    fn slot_ui(&mut self, ui: &mut egui::Ui, i: usize, rect: Rect, hovering_files: bool, actions: &mut Vec<Action>) {
         self.slot_rects.push((i, rect));
-        let visuals = ui.visuals().clone();
+        let resp = ui
+            .interact(rect, ui.id().with(("slot", i)), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
         let painter = ui.painter_at(rect);
         let progress = self.shared.progress(i);
         let key = self.config.key_for(i);
+        let pad = 16.0;
+        let drop_target = hovering_files && ui.ctx().pointer_hover_pos().is_some_and(|p| rect.contains(p));
+        let pressed = resp.is_pointer_button_down_on();
 
         match &self.config.slots[i] {
             None => {
-                let bg = if resp.hovered() || hovering_files {
-                    visuals.widgets.hovered.bg_fill
+                let bg = if pressed {
+                    p().surface_alt
+                } else if resp.hovered() || drop_target {
+                    p().surface_muted
                 } else {
-                    visuals.faint_bg_color
+                    p().bg
                 };
-                painter.rect_filled(rect, RADIUS, bg);
-                painter.rect_stroke(
-                    rect,
-                    RADIUS,
-                    Stroke::new(1.5f32, visuals.widgets.noninteractive.bg_stroke.color),
-                    StrokeKind::Inside,
-                );
-                painter.text(rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(32.0), visuals.weak_text_color());
-                painter.text(
-                    rect.center_bottom() - Vec2::new(0.0, 12.0),
-                    Align2::CENTER_BOTTOM,
-                    "clique ou arraste um som",
-                    FontId::proportional(11.0),
-                    visuals.weak_text_color(),
-                );
+                painter.rect_filled(rect, 0, bg);
+                let fg = if resp.hovered() || drop_target { p().text } else { p().text_muted };
+                paint_text(&painter, ui, rect.center() - Vec2::new(0.0, 6.0), Align2::CENTER_BOTTOM, icon(ph::PLUS, 22.0, fg));
+                let label = if drop_target { "Soltar aqui" } else { "Adicionar som" };
+                paint_text(&painter, ui, rect.center() + Vec2::new(0.0, 6.0), Align2::CENTER_TOP, caps(label, 9.0, fg));
+                if let Some(k) = &key {
+                    theme::key_cap(&painter, ui, rect.min + Vec2::splat(pad), k, p().border, p().text_muted);
+                }
             }
             Some(slot) => {
-                let base = slot_color(i, visuals.dark_mode);
-                let bg = if progress.is_some() {
-                    visuals.selection.bg_fill
-                } else if resp.hovered() {
-                    base.gamma_multiply(1.25)
+                let playing = progress.is_some();
+                let bg = if playing {
+                    VIOLET
+                } else if pressed {
+                    p().surface_alt
+                } else if resp.hovered() || drop_target {
+                    p().surface_muted
                 } else {
-                    base
+                    p().bg
                 };
-                painter.rect_filled(rect, RADIUS, bg);
-                if let Some(p) = progress {
-                    let bar = Rect::from_min_max(
-                        egui::pos2(rect.left(), rect.bottom() - 6.0),
-                        egui::pos2(rect.left() + rect.width() * p, rect.bottom()),
-                    );
-                    painter.rect_filled(bar, CornerRadius::same(3), Color32::from_white_alpha(200));
-                }
-                if resp.hovered() || hovering_files {
-                    painter.rect_stroke(rect, RADIUS, Stroke::new(2.0f32, visuals.strong_text_color()), StrokeKind::Inside);
+                painter.rect_filled(rect, 0, bg);
+                let soft = if playing { Color32::from_white_alpha(200) } else { p().text_variant };
+                let faint = if playing { Color32::from_white_alpha(110) } else { p().border };
+
+                if let Some(k) = &key {
+                    theme::key_cap(&painter, ui, rect.min + Vec2::splat(pad), k, faint, soft);
                 }
 
-                let text_color = Color32::WHITE;
-                let galley = painter.layout(
-                    slot.name.clone(),
-                    FontId::proportional(16.0),
-                    text_color,
-                    rect.width() - 16.0,
-                );
-                painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
-
-                let status = if self.loading.contains(&i) {
-                    Some("carregando…".to_string())
-                } else {
-                    self.load_errors.get(&i).map(|e| {
-                        if slot.path.exists() { format!("⚠ {e}") } else { "⚠ arquivo não encontrado".into() }
-                    })
-                };
-                if let Some(s) = status {
-                    let g = painter.layout(s, FontId::proportional(11.0), Color32::from_rgb(255, 220, 160), rect.width() - 12.0);
-                    painter.galley(egui::pos2(rect.left() + 6.0, rect.bottom() - 10.0 - g.size().y), g, Color32::WHITE);
-                }
-                let mut badges = Vec::new();
+                // Indicadores no canto superior direito.
+                let mut flags = String::new();
                 if slot.looping {
-                    badges.push("🔁");
+                    flags.push_str(ph::REPEAT);
                 }
                 if (slot.volume - 1.0).abs() > 0.01 {
-                    badges.push("🔉");
+                    if !flags.is_empty() {
+                        flags.push_str("  ");
+                    }
+                    flags.push_str(if slot.volume < 1.0 { ph::SPEAKER_LOW } else { ph::SPEAKER_HIGH });
                 }
-                painter.text(
-                    rect.right_top() + Vec2::new(-8.0, 6.0),
-                    Align2::RIGHT_TOP,
-                    badges.join(" "),
-                    FontId::proportional(12.0),
-                    text_color,
-                );
+                if !flags.is_empty() {
+                    paint_text(&painter, ui, Pos2::new(rect.right() - pad, rect.top() + pad + 2.0), Align2::RIGHT_TOP, icon(&flags, 15.0, soft));
+                }
+
+                // Metadados (duração · formato) ou estado.
+                let (meta, meta_color) = if self.loading.contains(&i) {
+                    ("Carregando…".to_string(), soft)
+                } else if let Some(e) = self.load_errors.get(&i) {
+                    let msg = if slot.path.exists() { e.clone() } else { "Arquivo não encontrado".into() };
+                    (msg, p().danger)
+                } else {
+                    let ext = slot.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_uppercase();
+                    let dur = self.clips.get(&i).map(|c| c.frames() as f32 / c.sample_rate as f32);
+                    match (dur, progress) {
+                        (Some(d), Some(p)) => (format!("{} / {}", fmt_time(d * p), fmt_time(d)), soft),
+                        (Some(d), None) => (format!("{} · {ext}", fmt_time(d)), soft),
+                        _ => (ext, soft),
+                    }
+                };
+                let mut meta_job = caps(&meta, 9.0, meta_color);
+                meta_job.wrap.max_width = rect.width() - pad * 2.0 - 28.0;
+                meta_job.wrap.max_rows = 1;
+                let meta_rect = paint_text(&painter, ui, Pos2::new(rect.left() + pad, rect.bottom() - pad - 2.0), Align2::LEFT_BOTTOM, meta_job);
+
+                // Nome, até duas linhas.
+                let size = if rect.width() > 190.0 { 21.0 } else { 17.0 };
+                let fg = if playing { Color32::WHITE } else { p().text };
+                let mut name: LayoutJob = display(&slot.name, size, fg);
+                name.wrap.max_width = rect.width() - pad * 2.0;
+                name.wrap.max_rows = 2;
+                paint_text(&painter, ui, Pos2::new(rect.left() + pad, meta_rect.top() - 6.0), Align2::LEFT_BOTTOM, name);
+
+                // Ação no canto inferior direito.
+                let action = if playing {
+                    Some(icon_fill(ph::STOP, 16.0, Color32::WHITE))
+                } else if resp.hovered() {
+                    Some(icon_fill(ph::PLAY, 16.0, fg))
+                } else {
+                    None
+                };
+                if let Some(job) = action {
+                    paint_text(&painter, ui, Pos2::new(rect.right() - pad, rect.bottom() - pad), Align2::RIGHT_BOTTOM, job);
+                }
+
+                if let Some(frac) = progress {
+                    let bar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 2.0), rect.max);
+                    paint_bar(&painter, bar, frac, Color32::from_white_alpha(60), Color32::WHITE);
+                }
             }
         }
-        if let Some(k) = &key {
-            painter.text(
-                rect.left_top() + Vec2::new(8.0, 6.0),
-                Align2::LEFT_TOP,
-                k,
-                FontId::monospace(12.0),
-                if self.config.slots[i].is_some() { Color32::from_white_alpha(220) } else { visuals.weak_text_color() },
-            );
+        if drop_target {
+            painter.rect_stroke(rect, 0, Stroke::new(1.0_f32, p().text), egui::StrokeKind::Inside);
         }
 
         if resp.clicked() {
@@ -153,41 +231,41 @@ impl SoundboardApp {
 
         let mut dirty = false;
         resp.context_menu(|ui| {
-            ui.set_min_width(220.0);
+            ui.set_min_width(260.0);
             match self.config.slots[i].as_mut() {
                 Some(slot) => {
-                    ui.horizontal(|ui| {
-                        ui.label("Nome");
-                        dirty |= ui.text_edit_singleline(&mut slot.name).changed();
-                    });
+                    ui.add_space(4.0);
+                    ui.label(eyebrow(&format!("Pad {:02}", i + 1)));
+                    ui.add_space(2.0);
                     dirty |= ui
-                        .add(
-                            egui::Slider::new(&mut slot.volume, 0.0..=2.0)
-                                .text("Volume")
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                        )
+                        .add(egui::TextEdit::singleline(&mut slot.name).desired_width(f32::INFINITY).margin(Vec2::new(10.0, 8.0)))
                         .changed();
-                    dirty |= ui.checkbox(&mut slot.looping, "Repetir (loop)").changed();
+                    ui.add_space(6.0);
+                    dirty |= theme::gain(ui, "Volume", &mut slot.volume, 2.0);
+                    ui.add_space(4.0);
+                    dirty |= ui.checkbox(&mut slot.looping, "Repetir em loop").changed();
                     dirty |= ui.checkbox(&mut slot.restart, "Clique reinicia em vez de parar").changed();
+                    dirty |= ui.checkbox(&mut slot.pinned, "Mostrar na barra de menus").changed();
                     ui.separator();
                     let key_label = key.as_deref().unwrap_or("nenhuma");
-                    if ui.button(format!("⌨ Tecla de atalho: {key_label}")).clicked() {
+                    if ui.button(icon_text(ph::KEYBOARD, &format!("Tecla de atalho: {key_label}"), p().text)).clicked() {
                         actions.push(Action::CaptureKey(i));
                         ui.close_menu();
                     }
-                    if ui.button("📂 Trocar arquivo…").clicked() {
+                    if ui.button(icon_text(ph::FOLDER_OPEN, "Trocar arquivo…", p().text)).clicked() {
                         actions.push(Action::Pick(i));
                         ui.close_menu();
                     }
-                    ui.label(egui::RichText::new(slot.path.display().to_string()).small().weak());
                     ui.separator();
-                    if ui.button("🗑 Remover").clicked() {
+                    if ui.button(icon_text(ph::TRASH, "Remover", p().danger)).clicked() {
                         actions.push(Action::Remove(i));
                         ui.close_menu();
                     }
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(slot.path.display().to_string()).size(10.5).color(p().text_muted));
                 }
                 None => {
-                    if ui.button("📂 Escolher arquivo…").clicked() {
+                    if ui.button(icon_text(ph::FOLDER_OPEN, "Escolher arquivo…", p().text)).clicked() {
                         actions.push(Action::Pick(i));
                         ui.close_menu();
                     }
@@ -198,18 +276,7 @@ impl SoundboardApp {
     }
 }
 
-fn slot_color(i: usize, dark: bool) -> Color32 {
-    const PALETTE: [(u8, u8, u8); 8] = [
-        (79, 110, 210),
-        (155, 89, 182),
-        (41, 150, 120),
-        (210, 110, 60),
-        (190, 70, 110),
-        (60, 140, 190),
-        (120, 140, 60),
-        (170, 120, 50),
-    ];
-    let (r, g, b) = PALETTE[i % PALETTE.len()];
-    let c = Color32::from_rgb(r, g, b);
-    if dark { c } else { c.gamma_multiply(0.95) }
+fn fmt_time(secs: f32) -> String {
+    let s = secs.max(0.0).round() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
 }
