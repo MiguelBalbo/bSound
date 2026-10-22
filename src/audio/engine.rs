@@ -130,10 +130,6 @@ impl AudioEngine {
         self.streams.clear();
     }
 
-    pub fn sender(&self) -> Sender<Command> {
-        self.cmd_tx.clone()
-    }
-
     pub fn send(&self, cmd: Command) {
         let _ = self.cmd_tx.try_send(cmd);
     }

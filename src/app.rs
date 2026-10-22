@@ -18,7 +18,8 @@ use crate::audio::shared::MAX_PAGES;
 use crate::config::{Config, Slot, TrayMode};
 use crate::devices;
 use crate::stats::Stats;
-use crate::tray::{self, Playback, Tray, TrayLink};
+use crate::tray::{self, Tray, TrayLink};
+use crate::ui::popover::Popover;
 use crate::ui::theme::*;
 use crate::ui::settings;
 use crate::ui::wizard::{self, Wizard, WizardOutcome};
@@ -47,6 +48,7 @@ pub struct SoundboardApp {
     pub(crate) stats: Arc<Stats>,
     tray_link: Arc<TrayLink>,
     tray: Option<Tray>,
+    pub(crate) popover: Option<Popover>,
     pub(crate) capture_key_for: Option<usize>,
     pub(crate) slot_rects: Vec<(usize, egui::Rect)>,
     mic_meter: f32,
@@ -81,12 +83,7 @@ impl SoundboardApp {
         crate::ui::theme::apply(&cc.egui_ctx, config.theme);
 
         let stats = Arc::new(Stats::load());
-        let tray_link = Arc::new(TrayLink {
-            playback: std::sync::Mutex::new(Playback { tx: engine.sender(), clips: HashMap::new() }),
-            shared: shared.clone(),
-            stats: stats.clone(),
-            ctx: cc.egui_ctx.clone(),
-        });
+        let tray_link = Arc::new(TrayLink::new(cc.egui_ctx.clone()));
         let tray = Tray::new(tray_link.clone());
 
         let mut app = Self {
@@ -107,6 +104,7 @@ impl SoundboardApp {
             stats,
             tray_link,
             tray,
+            popover: None,
             capture_key_for: None,
             slot_rects: Vec::new(),
             mic_meter: 0.0,
@@ -220,7 +218,7 @@ impl SoundboardApp {
     }
 
     /// Sons do menu da barra de menus: selecionados ou os mais tocados.
-    fn tray_entries(&self) -> (&'static str, Vec<(usize, String)>) {
+    pub(crate) fn tray_entries(&self) -> (&'static str, Vec<(usize, String)>) {
         let filled: Vec<(usize, &Slot)> = self
             .config
             .all_visible_slots()
@@ -233,24 +231,18 @@ impl SoundboardApp {
                 let mut played: Vec<_> = filled.iter().filter(|(i, _)| self.stats.get(*i) > 0).collect();
                 played.sort_by_key(|(i, _)| std::cmp::Reverse(self.stats.get(*i)));
                 if played.is_empty() {
-                    ("Sons", filled.iter().take(8).map(name).collect())
+                    ("Sons", filled.iter().take(9).map(name).collect())
                 } else {
-                    ("Mais tocados", played.into_iter().take(8).map(name).collect())
+                    ("Mais tocados", played.into_iter().take(9).map(name).collect())
                 }
             }
         }
     }
 
-    fn sync_tray(&mut self) {
-        {
-            let mut pb = self.tray_link.playback.lock().unwrap_or_else(|e| e.into_inner());
-            pb.tx = self.engine.sender();
-            pb.clips.clone_from(&self.clips);
-        }
-        let (title, entries) = self.tray_entries();
-        if let Some(t) = &mut self.tray {
-            t.update(title, entries);
-        }
+    pub(crate) fn show_main_window(&mut self, ctx: &egui::Context) {
+        tray::show_app();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     fn restart_engine(&mut self) {
@@ -477,7 +469,7 @@ impl SoundboardApp {
             }
             return;
         }
-        if ctx.wants_keyboard_input() || self.wizard.is_some() {
+        if ctx.wants_keyboard_input() || self.wizard.is_some() || self.settings_open {
             return;
         }
         // Setas ← → trocam de página.
@@ -543,7 +535,19 @@ impl eframe::App for SoundboardApp {
         // Fechar a janela esconde o app na barra de menus (se ativado nas configurações).
         if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray && self.tray.is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             tray::hide_app();
+        }
+        // Pedidos do ícone da barra de menus.
+        if let Some((x, y)) = self.tray_link.take_popover_request() {
+            if self.popover.take().is_none() {
+                let ppp = ctx.native_pixels_per_point().unwrap_or(2.0) as f64;
+                self.popover = Some(Popover::new(egui::pos2((x / ppp) as f32, (y / ppp) as f32)));
+            }
+        }
+        if self.tray_link.take_open_main() {
+            self.popover = None;
+            self.show_main_window(ctx);
         }
         self.poll_loads();
         self.handle_dropped_files(ctx);
@@ -552,18 +556,30 @@ impl eframe::App for SoundboardApp {
         self.mic_meter = self.shared.mic_level.take().max(self.mic_meter * 0.85);
         self.out_meter = self.shared.out_level.take().max(self.out_meter * 0.85);
 
+        // Com uma janela modal aberta, cliques não podem chegar aos pads e controles de trás.
+        let modal_open = self.settings_open || self.wizard.is_some() || self.capture_key_for.is_some();
         egui::SidePanel::left("sidebar")
             .exact_width(300.0)
             .resizable(false)
             .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin::symmetric(24, 0)))
-            .show(ctx, |ui| self.sidebar(ui));
+            .show(ctx, |ui| {
+                if modal_open {
+                    ui.disable();
+                }
+                self.sidebar(ui)
+            });
         egui::TopBottomPanel::bottom("status")
             .exact_height(36.0)
             .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin::symmetric(24, 0)))
             .show(ctx, |ui| self.status_bar(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(p().bg).inner_margin(egui::Margin { left: 32, right: 32, top: 0, bottom: 24 }))
-            .show(ctx, |ui| self.board_ui(ui));
+            .show(ctx, |ui| {
+                if modal_open {
+                    ui.disable();
+                }
+                self.board_ui(ui)
+            });
 
         if let Some(i) = self.capture_key_for {
             let modal = egui::Modal::new(egui::Id::new("key-capture"))
@@ -612,8 +628,8 @@ impl eframe::App for SoundboardApp {
             }
         }
 
+        self.popover_ui(ctx);
         self.sync_shared();
-        self.sync_tray();
         if self.dirty {
             self.config.save();
             self.dirty = false;

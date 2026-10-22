@@ -52,7 +52,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config) -> Outcome {
             hint(
                 ui,
                 match config.tray_mode {
-                    TrayMode::MostPlayed => "O clique no ícone mostra os 8 sons que você mais toca.",
+                    TrayMode::MostPlayed => "O clique no ícone mostra os 9 sons que você mais toca.",
                     TrayMode::Pinned => "Marque \"Mostrar na barra de menus\" no menu de cada pad (botão direito).",
                 },
             );

@@ -1,48 +1,41 @@
 //! Ícone na barra de menus do macOS.
-//! Clique esquerdo: menu com os sons (mais tocados ou selecionados) para tocar na hora.
-//! Clique direito: abrir a janela ou encerrar o app.
-//!
-//! O menu toca os sons direto pelo canal do mixer, sem passar pela UI, porque a janela
-//! pode estar escondida (e aí o egui não roda frames).
+//! Clique esquerdo: abre o popover de pads (desenhado pela UI, ver `ui::popover`).
+//! Clique direito: menu nativo para abrir a janela ou encerrar o app.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::Sender;
 use eframe::egui;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-use tray_icon::menu::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use crate::audio::clip::Clip;
-use crate::audio::mixer::Command;
-use crate::audio::shared::Shared;
-use crate::stats::Stats;
-
-/// O que o menu precisa para tocar sons; a UI mantém isto atualizado.
-pub struct Playback {
-    pub tx: Sender<Command>,
-    pub clips: HashMap<usize, Arc<Clip>>,
-}
-
+/// Pedidos que chegam dos eventos do ícone e são atendidos pela UI no próximo frame.
 pub struct TrayLink {
-    pub playback: Mutex<Playback>,
-    pub shared: Arc<Shared>,
-    pub stats: Arc<Stats>,
     pub ctx: egui::Context,
+    /// Clique esquerdo: centro horizontal e base do ícone, em pixels físicos da tela.
+    pub popover_anchor: Mutex<Option<(f64, f64)>>,
+    pub open_main: AtomicBool,
 }
 
-// TrayIcon e Menu não são Send; vivem na thread principal, onde os eventos também chegam.
-thread_local! {
-    static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-    static SOUNDS_MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
-    static APP_MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
+impl TrayLink {
+    pub fn new(ctx: egui::Context) -> Self {
+        Self { ctx, popover_anchor: Mutex::new(None), open_main: AtomicBool::new(false) }
+    }
+
+    pub fn take_popover_request(&self) -> Option<(f64, f64)> {
+        self.popover_anchor.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub fn take_open_main(&self) -> bool {
+        self.open_main.swap(false, Relaxed)
+    }
 }
 
+/// Mantém o ícone vivo enquanto o app roda.
 pub struct Tray {
-    last: Option<(String, Vec<(usize, String)>)>,
+    _icon: TrayIcon,
 }
 
 impl Tray {
@@ -50,8 +43,8 @@ impl Tray {
         let data = eframe::icon_data::from_png_bytes(include_bytes!("../assets/tray-icon.png")).ok()?;
         let icon = tray_icon::Icon::from_rgba(data.rgba, data.width, data.height).ok()?;
 
-        let app_menu = Menu::new();
-        let _ = app_menu.append_items(&[
+        let menu = Menu::new();
+        let _ = menu.append_items(&[
             &MenuItem::with_id("open", "Abrir bSound", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("quit", "Sair do bSound", true, None),
@@ -59,94 +52,66 @@ impl Tray {
         let tray = TrayIconBuilder::new()
             .with_icon_templated(icon)
             .with_tooltip("bSound")
-            .with_menu(Box::new(app_menu.clone()))
+            .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
             .build()
             .map_err(|e| log::error!("não foi possível criar o ícone da barra de menus: {e}"))
             .ok()?;
-        TRAY.with(|t| *t.borrow_mut() = Some(tray));
-        APP_MENU.with(|m| *m.borrow_mut() = Some(app_menu));
 
-        TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } = event {
-                show_sounds_menu();
+        let click_link = link.clone();
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, rect, .. } = event {
+                let anchor = (rect.position.x + rect.size.width as f64 / 2.0, rect.position.y + rect.size.height as f64);
+                *click_link.popover_anchor.lock().unwrap_or_else(|e| e.into_inner()) = Some(anchor);
+                activate_app();
+                click_link.ctx.request_repaint();
             }
         }));
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| handle_menu(&link, event.id().as_ref())));
-        Some(Self { last: None })
-    }
-
-    /// Recria o menu de sons se a lista mudou.
-    pub fn update(&mut self, title: &str, entries: Vec<(usize, String)>) {
-        if self.last.as_ref().is_some_and(|(t, e)| t == title && *e == entries) {
-            return;
-        }
-        let menu = Menu::new();
-        let _ = menu.append(&MenuItem::new(title, false, None));
-        if entries.is_empty() {
-            let _ = menu.append(&MenuItem::new("Nenhum som ainda", false, None));
-        }
-        for (slot, name) in &entries {
-            let _ = menu.append(&MenuItem::with_id(format!("play:{slot}"), name, true, None));
-        }
-        let _ = menu.append_items(&[
-            &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("stop", "Parar tudo", true, None),
-            &MenuItem::with_id("open", "Abrir bSound", true, None),
-        ]);
-        SOUNDS_MENU.with(|m| *m.borrow_mut() = Some(menu));
-        self.last = Some((title.to_owned(), entries));
-    }
-}
-
-fn show_sounds_menu() {
-    let sounds = SOUNDS_MENU.with(|m| m.borrow().clone());
-    let app = APP_MENU.with(|m| m.borrow().clone());
-    TRAY.with(|t| {
-        let t = t.borrow();
-        let (Some(tray), Some(sounds)) = (t.as_ref(), sounds) else { return };
-        // show_menu é síncrono no macOS: troca o menu, mostra, e devolve o menu do clique direito.
-        tray.set_menu(Some(Box::new(sounds)));
-        tray.show_menu();
-        tray.set_menu(app.map(|m| Box::new(m) as Box<dyn ContextMenu>));
-    });
-}
-
-fn handle_menu(link: &TrayLink, id: &str) {
-    let playback = link.playback.lock().unwrap_or_else(|e| e.into_inner());
-    match id {
-        "open" => show_app(),
-        "quit" => std::process::exit(0),
-        "stop" => {
-            let _ = playback.tx.try_send(Command::StopAll);
-        }
-        _ => {
-            let Some(slot) = id.strip_prefix("play:").and_then(|s| s.parse::<usize>().ok()) else { return };
-            if link.shared.is_playing(slot) {
-                let _ = playback.tx.try_send(Command::Stop(slot));
-            } else if let Some(clip) = playback.clips.get(&slot) {
-                let _ = playback.tx.try_send(Command::Play { slot, clip: clip.clone() });
-                link.stats.record(slot);
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| match event.id().as_ref() {
+            "open" => {
+                link.open_main.store(true, Relaxed);
+                show_app();
+                link.ctx.request_repaint();
             }
-        }
+            "quit" => std::process::exit(0),
+            _ => {}
+        }));
+        Some(Self { _icon: tray })
     }
-    link.ctx.request_repaint();
 }
 
-/// Esconde a janela e o ícone do Dock; o app continua na barra de menus.
+fn app() -> Option<objc2::rc::Retained<NSApplication>> {
+    MainThreadMarker::new().map(NSApplication::sharedApplication)
+}
+
+/// Some do Dock (a janela é escondida pela UI); o app continua na barra de menus.
 pub fn hide_app() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    app.hide(None);
+    if let Some(app) = app() {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
 }
 
 pub fn show_app() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    app.unhide(None);
+    if let Some(app) = app() {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        activate(&app);
+    }
+}
+
+/// Traz o app para frente (necessário para o popover receber cliques e foco).
+pub fn activate_app() {
+    if let Some(app) = app() {
+        activate(&app);
+    }
+}
+
+/// Se o bSound é o app ativo (falso quando o usuário clica em outro app).
+pub fn app_is_active() -> bool {
+    app().is_none_or(|app| app.isActive())
+}
+
+fn activate(app: &NSApplication) {
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
 }
