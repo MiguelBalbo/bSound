@@ -75,26 +75,23 @@ pub fn sync(ctx: &egui::Context) {
     IS_DARK.store(ctx.style().visuals.dark_mode, Relaxed);
 }
 
-/// Aplica o modo escolhido. "Sistema" é resolvido lendo a aparência do macOS diretamente:
+/// Aplica o modo escolhido. No macOS, "Sistema" é resolvido lendo a aparência diretamente:
 /// o tema que o winit repassa ao egui pode ficar desatualizado depois de trocar a preferência.
 pub fn set_mode(ctx: &egui::Context, mode: ThemeMode) {
-    let dark = match mode {
-        ThemeMode::System => system_is_dark(),
-        ThemeMode::Light => false,
-        ThemeMode::Dark => true,
+    let pref = match mode {
+        ThemeMode::System => match crate::platform::system_is_dark() {
+            Some(true) => egui::ThemePreference::Dark,
+            Some(false) => egui::ThemePreference::Light,
+            None => egui::ThemePreference::System,
+        },
+        ThemeMode::Light => egui::ThemePreference::Light,
+        ThemeMode::Dark => egui::ThemePreference::Dark,
     };
-    let pref = if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light };
     if ctx.options(|o| o.theme_preference) != pref {
         ctx.set_theme(pref);
     }
 }
 
-pub fn system_is_dark() -> bool {
-    use objc2_foundation::{ns_string, NSUserDefaults};
-    NSUserDefaults::standardUserDefaults()
-        .stringForKey(ns_string!("AppleInterfaceStyle"))
-        .is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
-}
 
 pub fn family(name: &str) -> FontFamily {
     FontFamily::Name(name.into())

@@ -61,7 +61,7 @@ impl SoundboardApp {
         let mut config = Config::load();
         let inputs = devices::input_names();
         let outputs = devices::output_names();
-        let blackhole = devices::blackhole_output(&outputs);
+        let blackhole = devices::virtual_output(&outputs);
 
         if config.output_device.as_ref().is_none_or(|o| !outputs.contains(o)) {
             config.output_device = blackhole.clone();
@@ -261,6 +261,7 @@ impl SoundboardApp {
     }
 
     fn refresh_devices(&mut self) {
+        crate::platform::refresh();
         self.inputs = devices::input_names();
         self.outputs = devices::output_names();
     }
@@ -284,7 +285,7 @@ impl SoundboardApp {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut restart = false;
-        ui.add_space(46.0); // espaço dos botões da janela do macOS
+        ui.add_space(crate::platform::TITLEBAR_INSET);
         ui.horizontal(|ui| {
             crate::ui::logo::header(ui, 22.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -347,7 +348,7 @@ impl SoundboardApp {
             });
             if !out_is_virtual {
                 ui.add_space(6.0);
-                if button(ui, Some(ph::ARROW_RIGHT), "Configurar BlackHole", Kind::Secondary).clicked() {
+                if button(ui, Some(ph::ARROW_RIGHT), "Configurar microfone virtual", Kind::Secondary).clicked() {
                     self.wizard = Some(Wizard::new());
                 }
             }
@@ -526,7 +527,7 @@ fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, none_la
 
 impl eframe::App for SoundboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Acompanha o modo claro/escuro do macOS quando a aparência é "Sistema".
+        // Acompanha o modo claro/escuro do sistema quando a aparência é "Sistema".
         if self.config.theme == crate::config::ThemeMode::System && self.last_theme_check.elapsed() > Duration::from_secs(1) {
             self.last_theme_check = std::time::Instant::now();
             crate::ui::theme::set_mode(ctx, self.config.theme);
@@ -539,10 +540,13 @@ impl eframe::App for SoundboardApp {
             tray::hide_app();
         }
         // Pedidos do ícone da barra de menus.
-        if let Some((x, y)) = self.tray_link.take_popover_request() {
+        if let Some(anchor) = self.tray_link.take_popover_request() {
             if self.popover.take().is_none() {
-                let ppp = ctx.native_pixels_per_point().unwrap_or(2.0) as f64;
-                self.popover = Some(Popover::new(egui::pos2((x / ppp) as f32, (y / ppp) as f32)));
+                let ppp = ctx.native_pixels_per_point().unwrap_or(1.0) as f64;
+                let to_pts = |v: f64| (v / ppp) as f32;
+                let anchor = anchor.map(|a| (to_pts(a.x), to_pts(a.top), to_pts(a.bottom)));
+                let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1440.0, 900.0));
+                self.popover = Some(Popover::new(anchor, screen));
             }
         }
         if self.tray_link.take_open_main() {
@@ -600,7 +604,7 @@ impl eframe::App for SoundboardApp {
         }
 
         if let Some(w) = &mut self.wizard {
-            let found = devices::blackhole_output(&self.outputs);
+            let found = devices::virtual_output(&self.outputs);
             match wizard::show(ctx, w, found.as_deref()) {
                 WizardOutcome::None => {}
                 WizardOutcome::Rescan => self.refresh_devices(),

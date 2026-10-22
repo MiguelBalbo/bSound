@@ -7,7 +7,7 @@
 
 <p align="center">
   <strong>Sua voz e seus sons, juntos em qualquer app.</strong><br>
-  Soundboard para macOS, escrito em Rust: mistura o microfone com os seus sons e envia tudo para um microfone virtual (BlackHole) que Discord, Zoom, OBS e outros apps enxergam como entrada.
+  Soundboard para macOS, Windows e Linux, escrito em Rust: mistura o microfone com os seus sons e envia tudo para um microfone virtual que Discord, Zoom, OBS e outros apps enxergam como entrada.
 </p>
 
 <p align="center">
@@ -16,15 +16,15 @@
 
 ## Recursos
 
-- **Mic + soundboard no mesmo canal.** O áudio do microfone e dos pads é mixado em tempo real, com limitador suave, e enviado para o BlackHole 2ch.
+- **Mic + soundboard no mesmo canal.** O áudio do microfone e dos pads é mixado em tempo real, com limitador suave, e enviado para o microfone virtual (BlackHole no macOS, VB-CABLE no Windows, saída virtual do PulseAudio/PipeWire no Linux).
 - **Pads com arrastar e soltar.** Clique num quadrado vazio ou arraste arquivos do Finder (MP3, WAV, OGG, FLAC, M4A/AAC, AIFF, CAF).
 - **Páginas de pads.** Crie quantas páginas precisar (até 16), navegue pelas setas ou pelas teclas ← →, e acompanhe a página atual no indicador do topo.
 - **Edição por pad.** Pelo botão direito do mouse: nome, volume, loop, "clique reinicia", tecla de atalho e "mostrar na barra de menus".
 - **Atalhos de teclado.** Cada pad da página aberta tem uma tecla (1–0, Q, W, E…), e você pode trocar.
 - **Monitor.** Ouça os sons (e, se quiser, o próprio mic) nos fones, separado da saída virtual.
-- **Barra de menus.** O ícone abre um popover com os sons mais tocados ou selecionados, em pads. Fechar a janela mantém o app rodando lá.
-- **Modo claro e escuro.** Pode acompanhar o macOS ou ficar fixo, nas Configurações.
-- **Assistente do BlackHole.** Se o driver não estiver instalado, o app guia a instalação via Homebrew ou pelo instalador oficial.
+- **Barra de menus / bandeja.** O ícone abre um popover com os sons mais tocados ou selecionados, em pads. Fechar a janela mantém o app rodando lá.
+- **Modo claro e escuro.** Pode acompanhar o sistema ou ficar fixo, nas Configurações.
+- **Assistente do microfone virtual.** Se não houver um, o app guia a instalação (Homebrew/instalador no macOS, VB-CABLE no Windows) ou cria o microfone na hora (Linux).
 
 ## Telas
 
@@ -38,9 +38,15 @@
 
 ## Requisitos
 
-- macOS 11 ou mais recente.
-- [BlackHole 2ch](https://existential.audio/blackhole/), o microfone virtual (o app ajuda a instalar).
-- Rust estável, para compilar.
+| Sistema | Microfone virtual | Escolha nos outros apps |
+|---|---|---|
+| macOS 11+ | [BlackHole 2ch](https://existential.audio/blackhole/) | BlackHole 2ch |
+| Windows 10/11 (x64) | [VB-CABLE](https://vb-audio.com/Cable/) | CABLE Output (VB-Audio Virtual Cable) |
+| Linux (x64, PulseAudio ou PipeWire) | saída virtual criada pelo app com `pactl` | bSound_Mic |
+
+O app ajuda a instalar ou criar o microfone virtual na primeira vez. No Linux são usados ALSA, GTK 3 e AppIndicator (`libasound2`, `libgtk-3-0`, `libxkbcommon-x11-0`, `libayatana-appindicator3-1`). No Linux, o bSound toca pela saída `pulse`, direcionada para a saída virtual `bsound`.
+
+Para compilar é preciso o Rust estável.
 
 ## Compilar e rodar
 
@@ -64,6 +70,14 @@ Para gerar o app (`dist/bSound.app`, com ícone e permissão de microfone própr
 ./scripts/bundle.sh
 ```
 
+Para gerar Linux x86_64 e Windows x86_64 a partir do Mac, num container (Docker/Colima, com caches no SSD):
+
+```bash
+./scripts/build-cross.sh
+```
+
+Os pacotes saem em `dist/` (`bsound-<versão>-linux-x86_64.tar.gz` e `bsound-<versão>-windows-x86_64.zip`). O workflow em `.github/workflows/build.yml` também compila e testa nos três sistemas a cada push.
+
 Para rodar os testes do mixer, do resampler e do decodificador:
 
 ```bash
@@ -72,13 +86,13 @@ cargo test
 
 ## Como usar
 
-1. Abra o bSound. Se o BlackHole não estiver instalado, siga o assistente.
-2. Em **Saída**, deixe **BlackHole 2ch** selecionado.
-3. No Discord, Zoom, OBS etc., escolha **BlackHole 2ch** como microfone.
+1. Abra o bSound. Se não houver microfone virtual, siga o assistente.
+2. Em **Saída**, deixe o microfone virtual selecionado (**BlackHole 2ch**, **CABLE Input** ou **pulse** no Linux).
+3. No Discord, Zoom, OBS etc., escolha o microfone virtual (veja a tabela em Requisitos).
 4. Adicione sons nos pads e toque clicando ou pelas teclas de atalho.
 5. Para ouvir os sons você mesmo, escolha seus fones em **Monitor**.
 
-Para encerrar o app quando ele estiver só na barra de menus, clique com o botão direito no ícone e escolha **Sair do bSound**.
+Para encerrar o app quando ele estiver só na barra de menus/bandeja, clique com o botão direito no ícone e escolha **Sair do bSound**. No Linux, o menu do ícone tem **Mostrar sons** no lugar do clique esquerdo.
 
 ## Estrutura
 
@@ -92,12 +106,13 @@ src/
   ui/settings.rs     configurações
   ui/wizard.rs       assistente do BlackHole
   ui/theme.rs        tema claro/escuro e componentes
-  tray.rs            ícone da barra de menus
+  tray.rs            ícone da barra de menus / bandeja
+  platform.rs        diferenças entre macOS, Windows e Linux
   stats.rs           contagem de sons mais tocados
 docs/                logo e capturas de tela do README
 ```
 
-Configurações e contagens ficam em `~/Library/Application Support/soundboard/`.
+Configurações e contagens ficam na pasta de configuração do sistema: `~/Library/Application Support/soundboard/` (macOS), `%APPDATA%\soundboard\` (Windows) ou `~/.config/soundboard/` (Linux).
 
 ## Marca
 

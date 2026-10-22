@@ -17,17 +17,33 @@ const CELL: f32 = 96.0;
 const PAD: f32 = 16.0;
 
 pub struct Popover {
-    /// Centro horizontal e base do ícone, em pontos.
-    anchor: Pos2,
+    /// Centro horizontal, topo e base do ícone, em pontos (`None` se o sistema não informa).
+    anchor: Option<(f32, f32, f32)>,
+    screen: Vec2,
     had_focus: bool,
     opened: Instant,
-    /// Diferença entre onde pedimos a janela e onde o macOS a colocou (corrigida uma vez).
+    /// Diferença entre onde pedimos a janela e onde o sistema a colocou (corrigida uma vez).
     offset: Option<Vec2>,
 }
 
 impl Popover {
-    pub fn new(anchor: Pos2) -> Self {
-        Self { anchor, had_focus: false, opened: Instant::now(), offset: None }
+    pub fn new(anchor: Option<(f32, f32, f32)>, screen: Vec2) -> Self {
+        Self { anchor, screen, had_focus: false, opened: Instant::now(), offset: None }
+    }
+
+    /// Abaixo do ícone se ele está no topo da tela (macOS), acima se está embaixo (barra de
+    /// tarefas do Windows); sem posição conhecida, no canto superior direito.
+    fn position(&self, size: Vec2) -> Pos2 {
+        let margin = 8.0;
+        let (x, y) = match self.anchor {
+            Some((cx, top, bottom)) => {
+                let y = if bottom < self.screen.y / 2.0 { bottom + 6.0 } else { top - size.y - 6.0 };
+                (cx - size.x / 2.0, y)
+            }
+            None => (self.screen.x - size.x - margin, 40.0),
+        };
+        let max_x = (self.screen.x - size.x - margin).max(margin);
+        Pos2::new(x.clamp(margin, max_x), y.max(0.0))
     }
 }
 
@@ -57,7 +73,7 @@ impl SoundboardApp {
         let rows = pads.len().div_ceil(COLS).max(1);
         let grid = Vec2::new(COLS as f32 * CELL + (COLS + 1) as f32, rows as f32 * CELL + (rows + 1) as f32);
         let size = Vec2::new(grid.x + PAD * 2.0, PAD + 22.0 + 14.0 + grid.y + 14.0 + 36.0 + PAD);
-        let wanted = Pos2::new(pop.anchor.x - size.x / 2.0, pop.anchor.y + 6.0);
+        let wanted = pop.position(size);
         let pos = wanted - pop.offset.unwrap_or_default();
         let needs_offset = pop.offset.is_none();
         let anchor_age = pop.opened.elapsed().as_secs_f32();
@@ -127,7 +143,7 @@ impl SoundboardApp {
             });
             let (focused, esc, close) = ctx.input(|i| (i.viewport().focused, i.key_pressed(egui::Key::Escape), i.viewport().close_requested()));
             focused_now = focused;
-            // O macOS pode deslocar janelas sem borda; mede onde ela ficou e compensa uma vez.
+            // O sistema pode deslocar janelas sem borda; mede onde ela ficou e compensa uma vez.
             if needs_offset {
                 if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
                     let delta = outer.min - wanted;

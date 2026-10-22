@@ -1,9 +1,10 @@
-//! Painel de configurações: aparência e comportamento da barra de menus.
+//! Painel de configurações: aparência e comportamento do ícone na barra de menus/bandeja.
 
 use eframe::egui::{self, Color32};
 use egui_phosphor::light as ph;
 
 use crate::config::{Config, ThemeMode, TrayMode};
+use crate::platform::TRAY_AREA;
 use crate::ui::theme::{self, *};
 
 pub enum Outcome {
@@ -30,18 +31,18 @@ pub fn show(ctx: &egui::Context, config: &mut Config) -> Outcome {
                 outcome = Outcome::Changed;
             }
             ui.add_space(8.0);
-            hint(ui, "\"Sistema\" acompanha o modo claro/escuro do macOS.");
+            hint(ui, "\"Sistema\" acompanha o modo claro/escuro do sistema operacional.");
 
             ui.add_space(22.0);
             hairline(ui);
             ui.add_space(22.0);
 
-            section(ui, "Barra de menus");
-            if ui.checkbox(&mut config.close_to_tray, "Continuar rodando na barra de menus ao fechar a janela").changed() {
+            section(ui, &capitalize(TRAY_AREA));
+            if ui.checkbox(&mut config.close_to_tray, format!("Continuar rodando na {TRAY_AREA} ao fechar a janela")).changed() {
                 outcome = Outcome::Changed;
             }
             ui.add_space(4.0);
-            hint(ui, "Para encerrar, clique com o botão direito no ícone do bSound na barra de menus e escolha \"Sair\".");
+            hint(ui, &format!("Para encerrar, clique com o botão direito no ícone do bSound na {TRAY_AREA} e escolha \"Sair\"."));
             ui.add_space(18.0);
             ui.label(caps("Sons no menu", 9.0, p().text_variant));
             ui.add_space(6.0);
@@ -49,13 +50,11 @@ pub fn show(ctx: &egui::Context, config: &mut Config) -> Outcome {
                 outcome = Outcome::Changed;
             }
             ui.add_space(8.0);
-            hint(
-                ui,
-                match config.tray_mode {
-                    TrayMode::MostPlayed => "O clique no ícone mostra os 9 sons que você mais toca.",
-                    TrayMode::Pinned => "Marque \"Mostrar na barra de menus\" no menu de cada pad (botão direito).",
-                },
-            );
+            let tray_hint = match config.tray_mode {
+                TrayMode::MostPlayed => "O clique no ícone mostra os 9 sons que você mais toca.".to_string(),
+                TrayMode::Pinned => format!("Marque \"Mostrar na {TRAY_AREA}\" no menu de cada pad (botão direito)."),
+            };
+            hint(ui, &tray_hint);
 
             ui.add_space(30.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -77,4 +76,9 @@ fn section(ui: &mut egui::Ui, title: &str) {
 
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(12.5).color(p().text_variant));
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }

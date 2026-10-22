@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # O .cargo/config.toml aponta para o SSD externo da máquina de desenvolvimento.
+  CARGO_TARGET_DIR: target
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: bsound-macos
+            binary: target/release/bsound
+          - os: windows-latest
+            artifact: bsound-windows
+            binary: target/release/bsound.exe
+          - os: ubuntu-latest
+            artifact: bsound-linux
+            binary: target/release/bsound
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependências do Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}

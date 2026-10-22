@@ -2,7 +2,7 @@
 name = "bsound"
 version = "0.1.0"
 edition = "2021"
-description = "bSound: mistura o microfone com um soundboard e envia para um microfone virtual (BlackHole)"
+description = "bSound: mistura o microfone com um soundboard e envia para um microfone virtual"
 
 [dependencies]
 anyhow = "1"
@@ -13,15 +13,24 @@ eframe = "0.31"
 egui-phosphor = { version = "0.9", default-features = false, features = ["light", "fill"] }
 env_logger = "0.11"
 log = "0.4"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSUserDefaults", "NSString"] }
 rfd = "0.15"
 ringbuf = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
 tray-icon = "0.26"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSUserDefaults", "NSString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# O ícone da bandeja no Linux roda num loop GTK próprio.
+gtk = "0.18"
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 lto = "thin"

@@ -293,7 +293,7 @@ impl SoundboardApp {
                     ui.add_space(4.0);
                     dirty |= ui.checkbox(&mut slot.looping, "Repetir em loop").changed();
                     dirty |= ui.checkbox(&mut slot.restart, "Clique reinicia em vez de parar").changed();
-                    dirty |= ui.checkbox(&mut slot.pinned, "Mostrar na barra de menus").changed();
+                    dirty |= ui.checkbox(&mut slot.pinned, format!("Mostrar na {}", crate::platform::TRAY_AREA)).changed();
                     ui.separator();
                     let key_label = key.as_deref().unwrap_or("nenhuma");
                     if ui.button(icon_text(ph::KEYBOARD, &format!("Tecla de atalho: {key_label}"), p().text)).clicked() {

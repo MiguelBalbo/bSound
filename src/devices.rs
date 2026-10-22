@@ -1,6 +1,6 @@
-//! Enumeração de dispositivos CoreAudio e detecção do BlackHole.
+//! Enumeração de dispositivos de áudio (CoreAudio, WASAPI ou ALSA, via cpal).
 
-use std::path::PathBuf;
+pub use crate::platform::{is_virtual, virtual_output};
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, Host};
@@ -31,20 +31,4 @@ pub fn find_output(host: &Host, name: Option<&str>) -> Option<Device> {
         Some(n) => host.output_devices().ok()?.find(|d| d.name().is_ok_and(|x| x == n)),
         None => host.default_output_device(),
     }
-}
-
-pub fn is_virtual(name: &str) -> bool {
-    name.to_lowercase().contains("blackhole")
-}
-
-/// Nome do dispositivo de saída do BlackHole, se instalado.
-pub fn blackhole_output(outputs: &[String]) -> Option<String> {
-    outputs.iter().find(|n| is_virtual(n)).cloned()
-}
-
-pub fn brew_path() -> Option<PathBuf> {
-    ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
 }
