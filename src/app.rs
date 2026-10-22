@@ -44,6 +44,8 @@ pub struct SoundboardApp {
     outputs: Vec<String>,
     wizard: Option<Wizard>,
     settings_open: bool,
+    /// Janela escondida na barra de menus/bandeja.
+    window_hidden: bool,
     last_theme_check: std::time::Instant,
     pub(crate) stats: Arc<Stats>,
     tray_link: Arc<TrayLink>,
@@ -100,6 +102,7 @@ impl SoundboardApp {
             outputs,
             wizard,
             settings_open: false,
+            window_hidden: false,
             last_theme_check: std::time::Instant::now(),
             stats,
             tray_link,
@@ -239,8 +242,24 @@ impl SoundboardApp {
         }
     }
 
+    /// Só redesenha rápido quando algo na tela está mudando. Pedidos do ícone, carregamento de
+    /// clipes e entrada do usuário já acordam a UI na hora; isto cobre as animações.
+    fn repaint_interval(&self) -> Duration {
+        let playing = self.config.all_visible_slots().any(|i| self.shared.is_playing(i));
+        let meters_moving = self.mic_meter > 0.01 || self.out_meter > 0.01;
+        let visible = !self.window_hidden || self.popover.is_some();
+        match (visible, playing, meters_moving) {
+            (false, _, _) => Duration::from_secs(1),
+            (true, true, _) => Duration::from_millis(33),
+            (true, false, true) => Duration::from_millis(50),
+            // Parado: confere de tempos em tempos se o mic começou a captar som.
+            (true, false, false) => Duration::from_millis(250),
+        }
+    }
+
     pub(crate) fn show_main_window(&mut self, ctx: &egui::Context) {
         tray::show_app();
+        self.window_hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
@@ -537,6 +556,7 @@ impl eframe::App for SoundboardApp {
         if ctx.input(|i| i.viewport().close_requested()) && self.config.close_to_tray && self.tray.is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.window_hidden = true;
             tray::hide_app();
         }
         // Pedidos do ícone da barra de menus.
@@ -638,6 +658,6 @@ impl eframe::App for SoundboardApp {
             self.config.save();
             self.dirty = false;
         }
-        ctx.request_repaint_after(Duration::from_millis(33));
+        ctx.request_repaint_after(self.repaint_interval());
     }
 }
